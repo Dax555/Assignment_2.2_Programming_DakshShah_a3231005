@@ -15,7 +15,6 @@ Conventions
 - n is the number of variables (length of x) and m the number of outputs of F.
 - C_f denotes the cost of one call to the user's function.
 
-Author(s): <team member name(s)>
 """
 
 import numpy as np

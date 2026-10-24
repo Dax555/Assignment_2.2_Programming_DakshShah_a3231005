@@ -11,7 +11,6 @@ Conventions
   binary search ignore NaN and emit a UserWarning saying how many were ignored.
 - Time/space complexity is given in terms of n, the length of the input.
 
-Author(s): <team member name(s)>
 """
 
 import warnings
