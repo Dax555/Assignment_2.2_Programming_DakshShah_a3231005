@@ -29,15 +29,19 @@ Conventions
 - Missing values are NaN in float columns and "", "nan", "none", "null", "na"
   in text columns. +/-inf is rejected with ValueError.
 - Everything is vectorised over samples. The only Python loops run over
-  columns (categories differ per column) or over the steps of a chain,
-  never over rows.
+  columns while learning (categories differ per column) or over the steps
+  of a chain, never over rows. transform is fully vectorised.
+- Every class inherits pipeline.Transformer and its fit takes an optional y
+  that is ignored, so all of them can be used inside a Pipeline.
 - Complexity is given in terms of n (rows in the chunk) and d (features).
   C is the total number of categories over all columns.
 """
 
 import numpy as np
 
-_MISSING_TOKENS = ("", "nan", "none", "null", "na")
+from .pipeline import Pipeline, Transformer
+from .utils import MISSING_TOKENS as _MISSING_TOKENS
+from .utils import as_float_array
 
 
 def _as_float_2d(X, name="X"):
@@ -67,18 +71,13 @@ def _as_float_2d(X, name="X"):
     Time: O(n d).
     Space: O(1) if `X` is already float, otherwise O(n d).
     """
-    try:
-        X = np.asarray(X, dtype=float)
-    except (TypeError, ValueError) as exc:
-        raise ValueError(f"{name} must be numeric; could not convert to float ({exc})") from exc
+    X = as_float_array(X, name, allow_inf=False).astype(float, copy=False)
     if X.ndim != 2:
         raise ValueError(f"{name} must be 2-D (n_samples, n_features), got shape {X.shape}")
-    if np.isinf(X).any():
-        raise ValueError(f"{name} contains infinity; remove or replace it before using it")
     return X
 
 
-def _as_2d(X, name="X"):
+def _as_any_2d(X, name="X"):
     """
     Validate X as a 2-D array of any dtype (used for text or mixed data).
 
@@ -181,7 +180,7 @@ def _is_missing(str_col):
     return np.isin(np.char.lower(str_col), _MISSING_TOKENS)
 
 
-class StandardScaler:
+class StandardScaler(Transformer):
     """
     Standardise features to zero mean and unit variance, incrementally.
 
@@ -360,7 +359,7 @@ class StandardScaler:
 
     update = partial_fit
 
-    def fit(self, X):
+    def fit(self, X, y=None):
         """
         Forget everything, then learn from X.
 
@@ -368,6 +367,8 @@ class StandardScaler:
         ----------
         X : array_like, shape (n, d)
             Training data.
+        y : None
+            Ignored. Accepted so the class can be the last step of a Pipeline given a y.
 
         Returns
         -------
@@ -423,7 +424,7 @@ class StandardScaler:
             out /= self.scale_
         return out
 
-    def fit_transform(self, X):
+    def fit_transform(self, X, y=None):
         """
         Fit on X, then transform it.
 
@@ -431,6 +432,8 @@ class StandardScaler:
         ----------
         X : array_like, shape (n, d)
             Data to fit and transform.
+        y : None
+            Ignored. Accepted so the class can be the last step of a Pipeline given a y.
 
         Returns
         -------
@@ -467,7 +470,7 @@ class StandardScaler:
             raise RuntimeError("StandardScaler is not fitted; call fit/partial_fit first")
 
 
-class MinMaxScaler:
+class MinMaxScaler(Transformer):
     """
     Scale each feature to `feature_range` using a running minimum and maximum.
 
@@ -587,7 +590,7 @@ class MinMaxScaler:
 
     update = partial_fit
 
-    def fit(self, X):
+    def fit(self, X, y=None):
         """
         Forget everything, then learn from X.
 
@@ -595,6 +598,8 @@ class MinMaxScaler:
         ----------
         X : array_like, shape (n, d)
             Training data.
+        y : None
+            Ignored. Accepted so the class can be the last step of a Pipeline given a y.
 
         Returns
         -------
@@ -654,7 +659,7 @@ class MinMaxScaler:
         out = np.where(seen, out, np.nan)
         return np.clip(out, lo, hi) if self.clip else out
 
-    def fit_transform(self, X):
+    def fit_transform(self, X, y=None):
         """
         Fit on X, then transform it.
 
@@ -662,6 +667,8 @@ class MinMaxScaler:
         ----------
         X : array_like, shape (n, d)
             Data to fit and transform.
+        y : None
+            Ignored. Accepted so the class can be the last step of a Pipeline given a y.
 
         Returns
         -------
@@ -698,7 +705,7 @@ class MinMaxScaler:
             raise RuntimeError("MinMaxScaler is not fitted; call fit/partial_fit first")
 
 
-class Imputer:
+class Imputer(Transformer):
     """
     Fill missing values, learning the fill value from the stream.
 
@@ -778,7 +785,7 @@ class Imputer:
         """
         self.n_features_ = None
         self.n_ = self.mean_ = None
-        self._counts = None
+        self._values = self._counts = None
         return self
 
     @property
@@ -799,7 +806,7 @@ class Imputer:
 
         Notes
         -----
-        Time: O(d) for "mean" and "constant"; O(D log D) for "most_frequent", where D is the number of distinct values.
+        Time: O(d) for "mean" and "constant"; O(D) for "most_frequent", where D is the number of distinct values.
         Space: O(d).
         """
         self._check_fitted()
@@ -807,7 +814,12 @@ class Imputer:
             return [self.fill_value] * self.n_features_
         if self.strategy == "mean":
             return [float(m) if n > 0 else self.fill_value for m, n in zip(self.mean_, self.n_)]
-        return [max(sorted(c), key=c.__getitem__) if c else None for c in self._counts]
+        # np.unique keeps the values sorted and argmax takes the first maximum,
+        # so ties go to the smallest value.
+        return [
+            v[np.argmax(c)].item() if c.size else None
+            for v, c in zip(self._values, self._counts)
+        ]
 
     def partial_fit(self, X):
         """
@@ -832,18 +844,21 @@ class Imputer:
         Notes
         -----
         "mean" merges the chunk mean with the running mean. "most_frequent"
-        adds the counts of each distinct non-missing value, looping over columns
-        only. "constant" learns nothing. `update` is an alias.
+        merges the chunk's value counts with the running counts using one
+        np.unique call per column, looping over columns only. "constant"
+        learns nothing. `update` is an alias.
 
-        Time: O(n d) for "mean"; O(d n log n) for "most_frequent".
-        Space: O(n d) temporary; "most_frequent" also stores one counter per distinct value.
+        Time: O(n d) for "mean"; O(d (n + D) log(n + D)) for "most_frequent",
+        where D is the number of distinct values seen so far in a column.
+        Space: O(n d) temporary; "most_frequent" also stores one value and one count per distinct value.
         """
-        X = _as_2d(X)
+        X = _as_any_2d(X)
         if self.n_features_ is None:
             self.n_features_ = X.shape[1]
             self.n_ = np.zeros(self.n_features_)
             self.mean_ = np.zeros(self.n_features_)
-            self._counts = [dict() for _ in range(self.n_features_)]
+            self._values = [None] * self.n_features_
+            self._counts = [np.zeros(0, dtype=np.int64) for _ in range(self.n_features_)]
         else:
             _check_n_features(self.n_features_, X)
 
@@ -858,6 +873,7 @@ class Imputer:
             self.mean_ = self.mean_ + (mean_b - self.mean_) * ratio
             self.n_ = n
         elif self.strategy == "most_frequent":
+            # One pass per column, because each column has its own set of values.
             for j in range(self.n_features_):
                 col = X[:, j]
                 if col.dtype.kind == "f":
@@ -865,14 +881,21 @@ class Imputer:
                 else:
                     s = _as_str_column(col)
                     vals = s[~_is_missing(s)]
-                uniq, cnt = np.unique(vals, return_counts=True)
-                for v, k in zip(uniq.tolist(), cnt.tolist()):
-                    self._counts[j][v] = self._counts[j].get(v, 0) + k
+                # Merge the running counts with this chunk's in a single np.unique.
+                if self._values[j] is not None:
+                    vals = np.concatenate([self._values[j], vals])
+                weights = np.concatenate(
+                    [self._counts[j], np.ones(vals.size - self._counts[j].size, dtype=np.int64)]
+                )
+                self._values[j], inverse = np.unique(vals, return_inverse=True)
+                self._counts[j] = np.bincount(
+                    inverse.reshape(-1), weights=weights, minlength=self._values[j].size
+                ).astype(np.int64)
         return self
 
     update = partial_fit
 
-    def fit(self, X):
+    def fit(self, X, y=None):
         """
         Forget everything, then learn from X.
 
@@ -880,6 +903,8 @@ class Imputer:
         ----------
         X : array_like, shape (n, d)
             Training data.
+        y : None
+            Ignored. Accepted so the class can be the last step of a Pipeline given a y.
 
         Returns
         -------
@@ -922,25 +947,27 @@ class Imputer:
 
         Notes
         -----
-        Columns with an unknown fill value (None) are left unchanged.
+        Columns with an unknown fill value (None) are left unchanged. Both
+        branches fill every column at once with np.where, no loop over columns
+        or rows.
 
         Time: O(n d).
         Space: O(n d).
         """
         self._check_fitted()
-        X = _as_2d(X)
+        X = _as_any_2d(X)
         _check_n_features(self.n_features_, X)
         stats = self.statistics_
         if X.dtype.kind == "f":
             vec = np.array([np.nan if v is None else float(v) for v in stats])
             return np.where(np.isnan(X), vec[None, :], X)
-        out = X.astype(object)
-        for j, v in enumerate(stats):
-            if v is not None:
-                out[_is_missing(_as_str_column(X[:, j])), j] = v
-        return out
+        fill = np.empty(self.n_features_, dtype=object)
+        fill[:] = stats
+        known = np.array([v is not None for v in stats], dtype=bool)
+        missing = _is_missing(np.char.strip(X.astype(str))) & known[None, :]
+        return np.where(missing, fill[None, :], X.astype(object))
 
-    def fit_transform(self, X):
+    def fit_transform(self, X, y=None):
         """
         Fit on X, then transform it.
 
@@ -948,6 +975,8 @@ class Imputer:
         ----------
         X : array_like, shape (n, d)
             Data to fit and fill.
+        y : None
+            Ignored. Accepted so the class can be the last step of a Pipeline given a y.
 
         Returns
         -------
@@ -984,7 +1013,7 @@ class Imputer:
             raise RuntimeError("Imputer is not fitted; call fit/partial_fit first")
 
 
-class OneHotEncoder:
+class OneHotEncoder(Transformer):
     """
     One-hot encode categorical columns, learning categories from a stream.
 
@@ -1148,7 +1177,7 @@ class OneHotEncoder:
         Time: O(d n log n).
         Space: O(n + C).
         """
-        X = _as_2d(X)
+        X = _as_any_2d(X)
         if self.n_features_ is None:
             self.n_features_ = X.shape[1]
             self.categories_ = [np.array([], dtype=str) for _ in range(X.shape[1])]
@@ -1156,6 +1185,8 @@ class OneHotEncoder:
             _check_n_features(self.n_features_, X)
         if self._frozen:
             return self
+        # One pass per column: each column keeps its own list of categories, and
+        # new ones go at the end so existing output columns never move.
         for j in range(self.n_features_):
             col = _as_str_column(X[:, j])
             col = col[~_is_missing(col)]
@@ -1166,7 +1197,7 @@ class OneHotEncoder:
 
     update = partial_fit
 
-    def fit(self, X):
+    def fit(self, X, y=None):
         """
         Forget everything, then learn from X.
 
@@ -1174,6 +1205,8 @@ class OneHotEncoder:
         ----------
         X : array_like, shape (n, d)
             Training data.
+        y : None
+            Ignored. Accepted so the class can be the last step of a Pipeline given a y.
 
         Returns
         -------
@@ -1217,26 +1250,35 @@ class OneHotEncoder:
 
         Notes
         -----
+        All columns are encoded with one comparison: output column k compares
+        input column owner[k] with category k, so there is no loop over columns.
+
         Time: O(n C).
         Space: O(n C).
         """
         self._check_fitted()
-        X = _as_2d(X)
+        X = _as_any_2d(X)
         _check_n_features(self.n_features_, X)
-        blocks = []
-        for j, cats in enumerate(self.categories_):
-            col = _as_str_column(X[:, j])
-            block = (col[:, None] == cats[None, :]).astype(float)
-            if self.handle_unknown == "error":
-                unknown = ~_is_missing(col) & ~block.any(axis=1)
-                if unknown.any():
-                    raise ValueError(
-                        f"Unknown categories in column {j}: {np.unique(col[unknown])[:5].tolist()}"
-                    )
-            blocks.append(block)
-        return np.hstack(blocks) if blocks else np.zeros((X.shape[0], 0))
+        Xs = np.char.strip(X.astype(str))
+        sizes = [len(cats) for cats in self.categories_]
+        # owner[k] is the input column that output column k belongs to.
+        owner = np.repeat(np.arange(self.n_features_), sizes)
+        cats = np.concatenate(self.categories_) if self.categories_ else np.array([], dtype=str)
+        out = (Xs[:, owner] == cats[None, :]).astype(float)
+        if self.handle_unknown == "error":
+            # A row matches at most one category per column, so mark those cells.
+            matched = np.zeros(Xs.shape, dtype=bool)
+            rows, ks = np.nonzero(out)
+            matched[rows, owner[ks]] = True
+            unknown = ~_is_missing(Xs) & ~matched
+            if unknown.any():
+                j = int(np.flatnonzero(unknown.any(axis=0))[0])
+                raise ValueError(
+                    f"Unknown categories in column {j}: {np.unique(Xs[unknown[:, j], j])[:5].tolist()}"
+                )
+        return out
 
-    def fit_transform(self, X):
+    def fit_transform(self, X, y=None):
         """
         Fit on X, then transform it.
 
@@ -1244,6 +1286,8 @@ class OneHotEncoder:
         ----------
         X : array_like, shape (n, d)
             Data to fit and encode.
+        y : None
+            Ignored. Accepted so the class can be the last step of a Pipeline given a y.
 
         Returns
         -------
@@ -1280,114 +1324,6 @@ class OneHotEncoder:
             raise RuntimeError("OneHotEncoder is not fitted; call fit/partial_fit first")
 
 
-class _Chain:
-    """
-    Run several steps in order.
-
-    In `partial_fit` each step learns from the output of the previous steps,
-    using their statistics so far.
-
-    Parameters
-    ----------
-    steps : list of transformers
-        Steps with partial_fit, transform and reset methods.
-    """
-    def __init__(self, steps):
-        """
-        Store the steps to run in order.
-
-        Parameters
-        ----------
-        steps : iterable of transformers
-            Steps to run, first to last.
-
-        Notes
-        -----
-        Time: O(s) for s steps.
-        Space: O(s).
-        """
-        self.steps = list(steps)
-
-    def reset(self):
-        """
-        Reset every step.
-
-        Returns
-        -------
-        _Chain
-            The same object (`self`).
-
-        Notes
-        -----
-        Time: O(s).
-        Space: O(1).
-        """
-        for st in self.steps:
-            st.reset()
-        return self
-
-    def partial_fit(self, X):
-        """
-        Fit each step on the output of the steps before it.
-
-        Parameters
-        ----------
-        X : array_like, shape (n, d)
-            Chunk of data.
-
-        Returns
-        -------
-        _Chain
-            The same object (`self`).
-
-        Raises
-        ------
-        ValueError
-            As raised by the steps.
-
-        Notes
-        -----
-        `update` is an alias.
-
-        Time: The sum of the cost of each step's `partial_fit` and `transform`.
-        Space: As for the steps.
-        """
-        for st in self.steps:
-            st.partial_fit(X)
-            X = st.transform(X)
-        return self
-
-    update = partial_fit
-
-    def transform(self, X):
-        """
-        Pass X through every step in order.
-
-        Parameters
-        ----------
-        X : array_like, shape (n, d)
-            Data to transform.
-
-        Returns
-        -------
-        np.ndarray
-            The output of the last step.
-
-        Raises
-        ------
-        ValueError
-            As raised by the steps.
-
-        Notes
-        -----
-        Time: The sum of the cost of each step's `transform`.
-        Space: As for the steps.
-        """
-        for st in self.steps:
-            X = st.transform(X)
-        return X
-
-
 def _as_step(t):
     """
     Turn None, one transformer or a list of transformers into a single step.
@@ -1400,19 +1336,23 @@ def _as_step(t):
     Returns
     -------
     None or transformer
-        None for None or an empty list, a `_Chain` for a non-empty list, otherwise `t` itself.
+        None for None or an empty list, a `pipeline.Pipeline` for a non-empty
+        list, otherwise `t` itself.
 
     Notes
     -----
+    The steps are named "step0", "step1", ... The Pipeline's partial_fit runs
+    each step on the output of the steps before it.
+
     Time: O(s) for s steps.
     Space: O(s).
     """
     if isinstance(t, (list, tuple)):
-        return _Chain(t) if t else None
+        return Pipeline([(f"step{i}", step) for i, step in enumerate(t)]) if t else None
     return t
 
 
-class ColumnTransformer:
+class ColumnTransformer(Transformer):
     """
     Send numeric and categorical columns through their own steps and join them.
 
@@ -1502,7 +1442,7 @@ class ColumnTransformer:
         Time: O(n d).
         Space: O(n d).
         """
-        X = _as_2d(X)
+        X = _as_any_2d(X)
         if self.n_features_ is not None:
             _check_n_features(self.n_features_, X)
         for c in self.numeric_cols + self.categorical_cols:
@@ -1568,7 +1508,7 @@ class ColumnTransformer:
 
     update = partial_fit
 
-    def fit(self, X):
+    def fit(self, X, y=None):
         """
         Forget everything, then learn from X.
 
@@ -1576,6 +1516,8 @@ class ColumnTransformer:
         ----------
         X : array_like, shape (n, d)
             Training data.
+        y : None
+            Ignored. Accepted so the class can be the last step of a Pipeline given a y.
 
         Returns
         -------
@@ -1630,7 +1572,7 @@ class ColumnTransformer:
             blocks.append(self.categorical.transform(cat))
         return np.hstack(blocks) if blocks else np.zeros((X.shape[0], 0))
 
-    def fit_transform(self, X):
+    def fit_transform(self, X, y=None):
         """
         Fit on X, then transform it.
 
@@ -1638,6 +1580,8 @@ class ColumnTransformer:
         ----------
         X : array_like, shape (n, d)
             Data to fit and transform.
+        y : None
+            Ignored. Accepted so the class can be the last step of a Pipeline given a y.
 
         Returns
         -------

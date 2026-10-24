@@ -1,6 +1,6 @@
 import numpy as np
 
-from numCompute.numCompute.rank import rank, percentile_rank, percentile
+from numCompute.rank import rank, percentile_rank, percentile
 
 X = [10, 20, 20, 30]
 
@@ -155,6 +155,15 @@ def test_rank_does_not_change_input():
     rank(x)
     assert (x == [3, 1, 2]).all()
 
+def test_percentile_agrees_with_stats_quantile():
+    from numCompute.stats import quantile
+    x = np.arange(26.0)
+    assert percentile(x, 28, "higher") == 7.0                # 0.28 * 25 is exactly 7
+    for n in (2, 26, 51):
+        a = np.arange(float(n))
+        for q in range(0, 101, 7):
+            for interp in ("linear", "lower", "higher", "midpoint"):
+                assert percentile(a, q, interp) == quantile(a, q / 100, interpolation=interp)
 
 if __name__ == "__main__":
     tests = [(n, f) for n, f in sorted(globals().items())

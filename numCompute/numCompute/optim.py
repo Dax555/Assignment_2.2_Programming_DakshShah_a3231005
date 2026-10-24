@@ -7,7 +7,8 @@ Finite-difference derivatives built using NumPy: grad and jacobian.
 - 'forward':  (f(x + h e_i) - f(x)) / h             error O(h),   n + 1 evaluations.
 
 The function is called with a fresh 1-D float array every time, so it may
-modify its argument without affecting x. A function that returns NaN or
+modify its argument without affecting x. With relative=True the step for
+x[j] is h * max(1, |x[j]|) instead of a fixed h. A function that returns NaN or
 infinity at any evaluation point raises ValueError.
 
 Conventions
@@ -117,6 +118,44 @@ def _check_step(h):
         raise ValueError(f"h must be a positive finite number, got {h}")
     return h
 
+def _step_sizes(x, h, relative):
+    """
+    Step size for each variable.
+
+    Parameters
+    ----------
+    x : np.ndarray of float, shape (n,)
+        Validated evaluation point.
+    h : float
+        Validated base step size (> 0).
+    relative : bool
+        If True, scale the step by max(1, |x[j]|).
+
+    Returns
+    -------
+    np.ndarray of float, shape (n,)
+        `h` for every variable, or h * max(1, |x[j]|) when `relative` is True.
+
+    Raises
+    ------
+    TypeError
+        If `relative` is not a bool.
+
+    Notes
+    -----
+    A fixed h is too small next to a large |x[j]|: near 1e10 neighbouring
+    floats are about 1.9e-6 apart, so x + h is rounded, and the change in f
+    is lost in f's own rounding error. Scaling the step with |x[j]| keeps
+    both changes well above rounding level, and the max(1, ...) keeps the
+    step from shrinking to nothing near x = 0.
+
+    Time: O(n). Space: O(n).
+    """
+    if not isinstance(relative, (bool, np.bool_)):
+        raise TypeError(f"relative must be a bool, got {type(relative).__name__}")
+    if relative:
+        return h * np.maximum(1.0, np.abs(x))
+    return np.full(x.shape, h)
 
 def _check_method(method):
     """
@@ -234,8 +273,8 @@ def _differences(func, x, h, method, name, scalar):
         of shape (m,).
     x : np.ndarray of float, shape (n,)
         Validated evaluation point.
-    h : float
-        Step size (> 0).
+    h : np.ndarray of float, shape (n,)
+        Step size for each variable (> 0).
     method : {'central', 'forward'}
         Difference scheme.
     name : str
@@ -269,21 +308,21 @@ def _differences(func, x, h, method, name, scalar):
         return np.empty((0, m))
 
     eye = np.eye(n)
-    plus = _stack([_evaluate(func, x + h * eye[j], name, scalar) for j in range(n)], name)
+    plus = _stack([_evaluate(func, x + h[j] * eye[j], name, scalar) for j in range(n)], name)
 
     if method == "central":
-        minus = _stack([_evaluate(func, x - h * eye[j], name, scalar) for j in range(n)], name)
+        minus = _stack([_evaluate(func, x - h[j] * eye[j], name, scalar) for j in range(n)], name)
         if minus.shape != plus.shape:
             raise ValueError(f"{name} must return the same number of outputs at every point")
-        return (plus - minus) / (2.0 * h)
+        return (plus - minus) / (2.0 * h[:, None])
 
     base = _evaluate(func, x.copy(), name, scalar)
     if base.shape[0] != plus.shape[1]:
         raise ValueError(f"{name} must return the same number of outputs at every point")
-    return (plus - base) / h
+    return (plus - base) / h[:, None]
 
 
-def grad(f, x, h=1e-5, method="central"):
+def grad(f, x, h=1e-5, method="central", relative=False):
     """
     Gradient of a scalar function f at x, estimated with finite differences.
 
@@ -305,6 +344,9 @@ def grad(f, x, h=1e-5, method="central"):
         error, too small a step increases round-off error.
     method : {'central', 'forward'}, default 'central'
         Difference scheme.
+    relative : bool, default False
+        If True, the step for x[j] is h * max(1, |x[j]|), which keeps the
+        estimate accurate when x has very large entries.
 
     Returns
     -------
@@ -315,8 +357,8 @@ def grad(f, x, h=1e-5, method="central"):
     Raises
     ------
     TypeError
-        If `f` is not callable or `h` is not a number.
-    ValueError
+        If `f` is not callable, `h` is not a number, or `relative` is not abool.
+        ValueError
         If `x` is not numeric, 1-D and finite; `h` is not positive and
         finite; `method` is not supported; or `f` returns a non-scalar or a
         NaN/infinite value.
@@ -332,10 +374,10 @@ def grad(f, x, h=1e-5, method="central"):
     point = _as_point(x)
     h = _check_step(h)
     _check_method(method)
-    return np.ascontiguousarray(_differences(f, point, h, method, "f", True)[:, 0])
+    steps = _step_sizes(point, h, relative)
+    return np.ascontiguousarray(_differences(f, point, steps, method, "f", True)[:, 0])
 
-
-def jacobian(F, x, h=1e-5, method="central"):
+def jacobian(F, x, h=1e-5, method="central", relative=False):
     """
     Jacobian of a vector function F at x, estimated with finite differences.
 
@@ -355,6 +397,8 @@ def jacobian(F, x, h=1e-5, method="central"):
         Step size, finite and > 0.
     method : {'central', 'forward'}, default 'central'
         Difference scheme.
+    relative : bool, default False
+        If True, the step for x[j] is h * max(1, |x[j]|), as in `grad`.
 
     Returns
     -------
@@ -365,8 +409,8 @@ def jacobian(F, x, h=1e-5, method="central"):
     Raises
     ------
     TypeError
-        If `F` is not callable or `h` is not a number.
-    ValueError
+        If `F` is not callable, `h` is not a number, or `relative` is not abool.
+        ValueError
         If `x` is not numeric, 1-D and finite; `h` is not positive and
         finite; `method` is not supported; `F` returns more than a 1-D array,
         a non-finite value, or a different number of outputs at different
@@ -383,4 +427,5 @@ def jacobian(F, x, h=1e-5, method="central"):
     point = _as_point(x)
     h = _check_step(h)
     _check_method(method)
-    return np.ascontiguousarray(_differences(F, point, h, method, "F", False).T)
+    steps = _step_sizes(point, h, relative)
+    return np.ascontiguousarray(_differences(F, point, steps, method, "F", False).T)

@@ -1,3 +1,12 @@
+"""
+pipeline.py
+Runs preprocessing steps one after another.
+Each step has fit and transform.
+FeatureUnion runs steps side by side and joins their outputs.
+"""
+
+import inspect
+
 import numpy as np
 
 __all__ = ["Transformer", "Estimator", "Pipeline", "FeatureUnion"]
@@ -21,7 +30,7 @@ class Transformer:
     def fit_transform(self, X, y=None):
         """fit then transform on the same X.
 
-        y is only passed on if it's given, because the preprocessors in this project define fit(X) without a y.
+        y is only passed on if it's given and fit accepts it, because the preprocessors in this project define fit(X) without a y.
 
         Parameters
         ----------
@@ -37,8 +46,7 @@ class Transformer:
         -----
         Same cost as calling fit and transform separately.
         """
-        fitted = self.fit(X) if y is None else self.fit(X, y)
-        return fitted.transform(X)
+        return _call_fit(self.fit, X, y).transform(X)
 
 
 class Estimator:
@@ -74,6 +82,27 @@ def _validate_steps(steps, owner):
     if duplicates:
         raise ValueError(f"step names must be unique, duplicated: {duplicates}")
     return [tuple(item) for item in steps]
+
+
+def _accepts_y(method):
+    try:
+        params = inspect.signature(method).parameters.values()
+    except (TypeError, ValueError):
+        return True
+    positional = 0
+    for p in params:
+        if p.kind == p.VAR_POSITIONAL or p.name == "y":
+            return True
+        if p.kind in (p.POSITIONAL_ONLY, p.POSITIONAL_OR_KEYWORD):
+            positional += 1
+    return positional >= 2
+
+
+def _call_fit(method, X, y):
+    # only hand y over if the method can take it, so fit(X) steps don't crash
+    if y is None or not _accepts_y(method):
+        return method(X)
+    return method(X, y)
 
 
 def _fit_transform_step(step, X):
@@ -112,6 +141,7 @@ class Pipeline(Transformer):
     -----
     Steps can be looked up by name or position: pipe["scale"] or pipe[0].
     The total cost is just the sum of the costs of the steps.
+    Steps that have partial_fit can also be trained chunk by chunk with partial_fit.
     """
 
     def __init__(self, steps):
@@ -156,6 +186,23 @@ class Pipeline(Transformer):
             X = step.transform(X)
         return X
 
+    def reset(self):
+        """Reset every step that has a reset method, and mark the Pipeline as not fitted.
+
+        Returns
+        -------
+        self
+
+        Notes
+        -----
+        O(number of steps), plus whatever each step's reset costs.
+        """
+        for _, step in self.steps:
+            if hasattr(step, "reset"):
+                step.reset()
+        self._is_fitted = False
+        return self
+
     def fit(self, X, y=None):
         """Fit every step in order.
 
@@ -163,21 +210,61 @@ class Pipeline(Transformer):
         ----------
         X : array-like of shape (n_samples, n_features)
         y : array-like of shape (n_samples,), optional
-            Only given to the last step. The preprocessors don't take a y.
+            Only given to the last step, and only if its fit accepts a y. The preprocessors don't take a y, so it's ignored for them.
 
         Returns
         -------
         self
+
+        Notes
+        -----
+        Each step's fit_transform is called once, so the cost is the sum of the steps.
         """
         X = self._fit_intermediate(X)
         final = self.steps[-1][1]
         # y only goes to the last step; the preprocessors' fit takes X only
-        if y is None:
-            final.fit(X)
-        else:
-            final.fit(X, y)
+        _call_fit(final.fit, X, y)
         self._is_fitted = True
         return self
+
+    def partial_fit(self, X, y=None):
+        """Update every step with one more chunk of data.
+
+        Each step learns from the chunk after it has gone through the steps before it, using what they have learned so far.
+
+        Parameters
+        ----------
+        X : array-like of shape (n_samples, n_features)
+            One chunk of data.
+        y : array-like of shape (n_samples,), optional
+            Only given to the last step, as in fit.
+
+        Returns
+        -------
+        self
+
+        Raises
+        ------
+        TypeError
+            A step has no partial_fit method. Nothing is updated in that case.
+
+        Notes
+        -----
+        Cost is the sum of each step's partial_fit and transform on the chunk. update is an alias.
+        """
+        for name, step in self.steps:
+            if not hasattr(step, "partial_fit"):
+                raise TypeError(
+                    f"step {name!r} ({type(step).__name__}) has no partial_fit method"
+                )
+        for _, step in self.steps[:-1]:
+            step.partial_fit(X)
+            X = step.transform(X)
+        _call_fit(self.steps[-1][1].partial_fit, X, y)
+        self._is_fitted = True
+        return self
+
+    update = partial_fit
 
     def transform(self, X):
         """Push X through every step using what was learned in fit.
@@ -199,6 +286,10 @@ class Pipeline(Transformer):
             Called before fit.
         TypeError
             The last step has no transform (it's a model, use predict).
+
+        Notes
+        -----
+        Cost is the sum of each step's transform.
         """
         self._check_fitted()
         name, final = self.steps[-1]
@@ -215,7 +306,7 @@ class Pipeline(Transformer):
         ----------
         X: array-like of shape (n_samples, n_features)
         y: array-like of shape (n_samples,), optional
-            Only given to the last step.
+            Only given to the last step, and only if its fit accepts a y.
 
         Returns
         -------
@@ -226,6 +317,10 @@ class Pipeline(Transformer):
         ------
         TypeError
             The last step has no transform method.
+
+        Notes
+        -----
+        Same cost as fit followed by transform, but the data only goes through the steps once.
         """
         name, final = self.steps[-1]
         # check this before fitting anything, so we never end up half-fitted
@@ -237,7 +332,7 @@ class Pipeline(Transformer):
         if y is None:
             X = _fit_transform_step(final, X)
         else:
-            X = final.fit(X, y).transform(X)
+            X = _call_fit(final.fit, X, y).transform(X)
         self._is_fitted = True
         return X
 
@@ -259,6 +354,10 @@ class Pipeline(Transformer):
             Called before fit.
         TypeError
             The last step has no predict method.
+
+        Notes
+        -----
+        Cost is the sum of the transforms plus the model's predict.
         """
         self._check_fitted()
         name, final = self.steps[-1]
@@ -315,9 +414,18 @@ class FeatureUnion(Transformer):
     def fit(self, X, y=None):
         """Fit each transformer on X. y is ignored.
 
+        Parameters
+        ----------
+        X: array-like of shape (n_samples, n_features)
+        y: ignored
+
         Returns
         -------
         self
+
+        Notes
+        -----
+        Cost is the sum of each transformer's fit.
         """
         for _, step in self.transformer_list:
             step.fit(X)
@@ -326,6 +434,10 @@ class FeatureUnion(Transformer):
 
     def transform(self, X):
         """Transform X with each transformer and stack the outputs side by side.
+
+        Parameters
+        ----------
+        X: array-like of shape (n_samples, n_features)
 
         Returns
         -------
@@ -337,6 +449,10 @@ class FeatureUnion(Transformer):
             Called before fit.
         ValueError
             The transformers returned different numbers of rows.
+
+        Notes
+        -----
+        Cost is the sum of each transformer's transform, plus O(n_samples * total columns) for the hstack.
         """
         if not self._is_fitted:
             raise RuntimeError("FeatureUnion is not fitted yet; call fit first")
@@ -347,9 +463,23 @@ class FeatureUnion(Transformer):
     def fit_transform(self, X, y=None):
         """fit and transform each transformer, then stack the outputs.
 
+        Parameters
+        ----------
+        X: array-like of shape (n_samples, n_features)
+        y: ignored
+
         Returns
         -------
         numpy.ndarray of shape (n_samples, total columns)
+
+        Raises
+        ------
+        ValueError
+            The transformers returned different numbers of rows.
+
+        Notes
+        -----
+        Same cost as fit followed by transform.
         """
         outputs = [
             (name, _fit_transform_step(step, X)) for name, step in self.transformer_list

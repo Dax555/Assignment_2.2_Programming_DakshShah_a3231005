@@ -2,12 +2,17 @@
 stats.py
 ========
 Descriptive statistics built using NumPy: count, mean, var, std, min, max,
-quantile, median, mode, histogram, and a describe() summary.
+quantile, median, mode, histogram, a describe() summary, and RunningStats
+for streaming (Welford) statistics.
 
 Conventions
 -----------
-- Inputs are 1-D or 2-D. `axis=None` reduces over all values; for 2-D data
+- Inputs are at least 1-D. `axis=None` reduces over all values; for 2-D data
   `axis=0` gives one result per column and `axis=1` one result per row.
+  Higher-dimensional input works the same way, reducing along `axis`.
+  mode and histogram take 1-D data, describe takes 1-D or 2-D data.
+- min and max are not in __all__, so "from stats import *" does not hide
+  Python's built-in min and max. Call them as stats.min and stats.max.
 - NaN is treated as missing and ignored. Infinity is rejected with ValueError.
 - A statistic with no valid values (or too few for `ddof`) is NaN.
 - Time/space complexity is given in terms of N, the total number of elements
@@ -17,19 +22,19 @@ Conventions
 
 import numpy as np
 
+from .utils import INTERPOLATIONS as _INTERPOLATIONS
+from .utils import MISSING_TOKENS as _MISSING_TOKENS
+from .utils import as_float_array, check_axis
+
 __all__ = [
-    "count", "mean", "var", "std", "min", "max", "quantile", "median",
+    "count", "mean", "var", "std", "quantile", "median",
     "mode", "histogram", "describe", "describe_categorical",
-    "format_summary", "format_histogram",
+    "format_summary", "format_histogram", "RunningStats",
 ]
-
-_INTERPOLATIONS = ("linear", "lower", "higher", "midpoint")
-_MISSING_TOKENS = ("", "nan", "none", "null", "na")
-
 
 def _as_float_array(data, name="data"):
     """
-    Convert the input to a float array and check it is 1-D or 2-D without infinity.
+    Convert the input to a float array and check it is at least 1-D without infinity.
 
     Parameters
     ----------
@@ -40,29 +45,23 @@ def _as_float_array(data, name="data"):
 
     Returns
     -------
-    np.ndarray of float, shape (n,) or (n, d)
-        The data as a float array (no copy if already float).
+    np.ndarray of float64, at least 1-D
+        The data as a float array (no copy if already float64).
 
     Raises
     ------
     ValueError
-        If the data cannot be converted to float, is not 1-D or 2-D, or
+        If the data is complex or cannot be converted to float, is 0-D, or
         contains infinity.
 
     Notes
     -----
     Time: O(N). Space: O(1) if already float, otherwise O(N).
     """
-    try:
-        arr = np.asarray(data, dtype=float)
-    except (TypeError, ValueError) as exc:
-        raise ValueError(f"{name} must be numeric; could not convert to float ({exc})") from exc
-    if arr.ndim not in (1, 2):
-        raise ValueError(f"{name} must be 1-D or 2-D, got shape {arr.shape}")
-    if np.isinf(arr).any():
-        raise ValueError(f"{name} contains infinity; remove or replace it before using it")
+    arr = as_float_array(data, name, allow_inf=False).astype(float, copy=False)
+    if arr.ndim == 0:
+        raise ValueError(f"{name} must be at least 1-D, got a scalar")
     return arr
-
 
 def _check_axis(arr, axis):
     """
@@ -91,13 +90,7 @@ def _check_axis(arr, axis):
     -----
     Time: O(1). Space: O(1).
     """
-    if axis is None:
-        return None
-    if isinstance(axis, (bool, np.bool_)) or not isinstance(axis, (int, np.integer)):
-        raise TypeError(f"axis must be None or an integer, got {type(axis).__name__}")
-    if not -arr.ndim <= axis < arr.ndim:
-        raise ValueError(f"axis {axis} is out of range for a {arr.ndim}-D array")
-    return int(axis) % arr.ndim
+    return check_axis(axis, arr.ndim, allow_none=True)
 
 
 def _check_ddof(ddof):
@@ -188,7 +181,7 @@ def _mean(arr, axis, keepdims=False):
 
     Parameters
     ----------
-    arr : np.ndarray of float, shape (n,) or (n, d)
+    arr : np.ndarray of float, at least 1-D
         Validated input.
     axis : int or None
         Validated axis.
@@ -204,13 +197,22 @@ def _mean(arr, axis, keepdims=False):
 
     Notes
     -----
+    The values are divided by a power of two near the largest |value| before
+    summing, so the sum cannot overflow (mean([1e308, 1e308]) is 1e308, not
+    inf). Dividing by a power of two is exact, so the result is unchanged.
+
     Time: O(N). Space: O(N).
     """
     valid = ~np.isnan(arr)
     n = valid.sum(axis=axis, keepdims=keepdims)
-    total = np.where(valid, arr, 0.0).sum(axis=axis, keepdims=keepdims)
-    return _divide(total, n)
-
+    biggest = np.where(valid, np.abs(arr), 0.0).max(axis=axis, keepdims=True, initial=0.0)
+    # Dividing by 2**(exponent - 1) keeps every scaled value below 2, so the
+    # sum stays finite.
+    scale = np.ldexp(1.0, np.frexp(biggest)[1] - 1)
+    total = np.where(valid, arr / scale, 0.0).sum(axis=axis, keepdims=keepdims)
+    if not keepdims:
+        scale = scale.reshape(()) if axis is None else np.squeeze(scale, axis=axis)
+    return _divide(total, n) * scale
 
 def count(data, axis=None):
     """
@@ -234,7 +236,7 @@ def count(data, axis=None):
     TypeError
         If `axis` is not None or an integer.
     ValueError
-        If `data` is not numeric, not 1-D or 2-D, or contains infinity, or if
+        If `data` is not numeric, 0-D, or contains infinity, or if
         `axis` is out of range.
 
     Notes
@@ -268,7 +270,7 @@ def mean(data, axis=None):
     TypeError
         If `axis` is not None or an integer.
     ValueError
-        If `data` is not numeric, not 1-D or 2-D, or contains infinity, or if
+        If `data` is not numeric, 0-D, or contains infinity, or if
         `axis` is out of range.
 
     Notes
@@ -307,7 +309,7 @@ def var(data, axis=None, ddof=0):
     TypeError
         If `axis` or `ddof` is not an integer (axis may also be None).
     ValueError
-        If `data` is not numeric, not 1-D or 2-D, or contains infinity;
+        If `data` is not numeric, 0-D, or contains infinity;
         `axis` is out of range; or `ddof` is negative.
 
     Notes
@@ -350,7 +352,7 @@ def std(data, axis=None, ddof=0):
     TypeError
         If `axis` or `ddof` is not an integer (axis may also be None).
     ValueError
-        If `data` is not numeric, not 1-D or 2-D, or contains infinity;
+        If `data` is not numeric, 0-D, or contains infinity;
         `axis` is out of range; or `ddof` is negative.
 
     Notes
@@ -383,7 +385,7 @@ def min(data, axis=None):
     TypeError
         If `axis` is not None or an integer.
     ValueError
-        If `data` is not numeric, not 1-D or 2-D, or contains infinity, or if
+        If `data` is not numeric, 0-D, or contains infinity, or if
         `axis` is out of range.
 
     Notes
@@ -420,7 +422,7 @@ def max(data, axis=None):
     TypeError
         If `axis` is not None or an integer.
     ValueError
-        If `data` is not numeric, not 1-D or 2-D, or contains infinity, or if
+        If `data` is not numeric, 0-D, or contains infinity, or if
         `axis` is out of range.
 
     Notes
@@ -571,7 +573,7 @@ def quantile(data, q, axis=None, interpolation="linear"):
     TypeError
         If `axis` is not None or an integer.
     ValueError
-        If `data` is not numeric, not 1-D or 2-D, or contains infinity;
+        If `data` is not numeric, 0-D, or contains infinity;
         `axis` is out of range; `interpolation` is unknown; or `q` is not
         numeric, empty, more than 1-D, or outside [0, 1].
 
@@ -621,7 +623,7 @@ def median(data, axis=None):
     TypeError
         If `axis` is not None or an integer.
     ValueError
-        If `data` is not numeric, not 1-D or 2-D, or contains infinity, or if
+        If `data` is not numeric, 0-D, or contains infinity, or if
         `axis` is out of range.
 
     Notes
@@ -691,7 +693,9 @@ def histogram(data, bins=10, range=None, density=False):
         of B + 1 finite bin edges.
     range : (float, float), optional
         (low, high) with low < high, both finite; only allowed when `bins` is
-        an integer. Defaults to the minimum and maximum of the non-NaN data
+        an integer. Named `range` to match np.histogram; the built-in range is
+        not used inside this function, so nothing breaks. Defaults to the
+        minimum and maximum of the non-NaN data
         ((0, 1) for empty data). If low equals high the interval is widened
         by 0.5 on each side.
     density : bool, default False
@@ -802,6 +806,8 @@ def describe(data, names=None):
     Time: O(N log n) for n rows (the quartiles need a sort). Space: O(N).
     """
     arr = _as_float_array(data)
+    if arr.ndim > 2:
+        raise ValueError(f"data must be 1-D or 2-D, got shape {arr.shape}")
     if arr.ndim == 1:
         arr = arr.reshape(-1, 1)
     n_cols = arr.shape[1]
@@ -990,3 +996,269 @@ def format_histogram(counts, edges, width=40):
         value = str(int(c)) if np.issubdtype(counts.dtype, np.integer) else f"{c:.4f}"
         lines.append(f"{label} | {bar} {value}")
     return "\n".join(lines)
+
+class RunningStats:
+    """
+    Streaming count, mean, variance, min and max, updated one chunk at a time.
+
+    Each chunk is summarised (count, mean and M2, the sum of squared
+    deviations from the mean) and merged into the running totals with
+    Welford's update in the parallel form of Chan et al. Old chunks are never
+    needed again, so data larger than memory can be summarised.
+
+    Attributes
+    ----------
+    n_ : np.ndarray of float, shape () or (d,)
+        Non-NaN values seen so far (per column for 2-D chunks).
+    mean_ : np.ndarray of float, shape () or (d,)
+        Running mean.
+    M2_ : np.ndarray of float, shape () or (d,)
+        Running sum of squared deviations from the mean.
+    min_, max_ : np.ndarray of float, shape () or (d,)
+        Running minimum and maximum (+inf / -inf until a value is seen).
+
+    Notes
+    -----
+    Chunks are 1-D (one stream of numbers) or 2-D (n, d) with one result per
+    column. Every chunk must have the same number of columns. NaN is ignored,
+    and infinity is rejected, as in the rest of this module. Merging the
+    chunk means instead of summing x and x**2 avoids the cancellation error
+    of E[x^2] - E[x]^2, so the results match var() on all of the data.
+    """
+
+    def __init__(self):
+        """
+        Create an empty accumulator.
+
+        Notes
+        -----
+        Time: O(1). Space: O(1).
+        """
+        self.reset()
+
+    def reset(self):
+        """
+        Forget everything seen so far.
+
+        Returns
+        -------
+        RunningStats
+            The same object (`self`).
+
+        Notes
+        -----
+        Time: O(1). Space: O(1).
+        """
+        self.n_ = self.mean_ = self.M2_ = self.min_ = self.max_ = None
+        self._shape = None
+        return self
+
+    def partial_fit(self, data):
+        """
+        Merge one chunk into the running statistics.
+
+        Parameters
+        ----------
+        data : array_like, shape (n,) or (n, d)
+            Chunk of numbers; NaN is ignored. May have n = 0.
+
+        Returns
+        -------
+        RunningStats
+            The same object (`self`).
+
+        Raises
+        ------
+        ValueError
+            If `data` is not numeric, contains infinity, is not 1-D or 2-D,
+            or has a different number of columns than the first chunk.
+
+        Notes
+        -----
+        `update` is an alias.
+
+        Time: O(n d). Space: O(n d) temporary, O(d) stored.
+        """
+        arr = _as_float_array(data)
+        if arr.ndim > 2:
+            raise ValueError(f"data must be 1-D or 2-D, got shape {arr.shape}")
+        if self._shape is None:
+            self._shape = arr.shape[1:]
+            self.n_ = np.zeros(self._shape)
+            self.mean_ = np.zeros(self._shape)
+            self.M2_ = np.zeros(self._shape)
+            self.min_ = np.full(self._shape, np.inf)
+            self.max_ = np.full(self._shape, -np.inf)
+        elif arr.shape[1:] != self._shape:
+            raise ValueError(
+                f"chunk has shape {arr.shape}, expected (n,) + {self._shape}"
+            )
+
+        valid = ~np.isnan(arr)
+        n_b = valid.sum(axis=0).astype(float)
+        mean_b = np.where(n_b > 0, _mean(arr, 0), 0.0)
+        M2_b = np.where(valid, (arr - mean_b) ** 2, 0.0).sum(axis=0)
+
+        # Chan et al.: combine the two (count, mean, M2) summaries in one step.
+        n = self.n_ + n_b
+        ratio = np.where(n > 0, _divide(n_b, n), 0.0)
+        delta = mean_b - self.mean_
+        self.mean_ = self.mean_ + delta * ratio
+        self.M2_ = self.M2_ + M2_b + delta ** 2 * self.n_ * ratio
+        self.n_ = n
+        self.min_ = np.minimum(self.min_, np.where(valid, arr, np.inf).min(axis=0, initial=np.inf))
+        self.max_ = np.maximum(self.max_, np.where(valid, arr, -np.inf).max(axis=0, initial=-np.inf))
+        return self
+
+    update = partial_fit
+
+    def _check_fitted(self):
+        """
+        Raise an error if no chunk has been seen yet.
+
+        Raises
+        ------
+        RuntimeError
+            If neither `partial_fit` nor `update` has been called.
+
+        Notes
+        -----
+        Time: O(1). Space: O(1).
+        """
+        if self._shape is None:
+            raise RuntimeError("RunningStats has seen no data; call partial_fit first")
+
+    def count(self):
+        """
+        Number of non-NaN values seen.
+
+        Returns
+        -------
+        int or np.ndarray of int, shape (d,)
+
+        Raises
+        ------
+        RuntimeError
+            If no chunk has been seen yet.
+
+        Notes
+        -----
+        Time: O(d). Space: O(d).
+        """
+        self._check_fitted()
+        return _finish(self.n_.astype(np.int64))
+
+    def mean(self):
+        """
+        Mean of the values seen; NaN where nothing has been seen.
+
+        Returns
+        -------
+        float or np.ndarray of float, shape (d,)
+
+        Raises
+        ------
+        RuntimeError
+            If no chunk has been seen yet.
+
+        Notes
+        -----
+        Time: O(d). Space: O(d).
+        """
+        self._check_fitted()
+        return _finish(np.where(self.n_ > 0, self.mean_, np.nan))
+
+    def var(self, ddof=0):
+        """
+        Variance of the values seen, M2 / (n - ddof).
+
+        Parameters
+        ----------
+        ddof : int, default 0
+            Delta degrees of freedom, as in `var`.
+
+        Returns
+        -------
+        float or np.ndarray of float, shape (d,)
+            NaN where n - ddof <= 0.
+
+        Raises
+        ------
+        RuntimeError
+            If no chunk has been seen yet.
+        TypeError, ValueError
+            If `ddof` is not a non-negative integer.
+
+        Notes
+        -----
+        Time: O(d). Space: O(d).
+        """
+        self._check_fitted()
+        ddof = _check_ddof(ddof)
+        return _finish(_divide(self.M2_, self.n_ - ddof))
+
+    def std(self, ddof=0):
+        """
+        Standard deviation of the values seen (square root of `var`).
+
+        Parameters
+        ----------
+        ddof : int, default 0
+            Delta degrees of freedom.
+
+        Returns
+        -------
+        float or np.ndarray of float, shape (d,)
+
+        Raises
+        ------
+        RuntimeError
+            If no chunk has been seen yet.
+        TypeError, ValueError
+            If `ddof` is not a non-negative integer.
+
+        Notes
+        -----
+        Time: O(d). Space: O(d).
+        """
+        return _finish(np.sqrt(self.var(ddof)))
+
+    def min(self):
+        """
+        Smallest value seen; NaN where nothing has been seen.
+
+        Returns
+        -------
+        float or np.ndarray of float, shape (d,)
+
+        Raises
+        ------
+        RuntimeError
+            If no chunk has been seen yet.
+
+        Notes
+        -----
+        Time: O(d). Space: O(d).
+        """
+        self._check_fitted()
+        return _finish(np.where(self.n_ > 0, self.min_, np.nan))
+
+    def max(self):
+        """
+        Largest value seen; NaN where nothing has been seen.
+
+        Returns
+        -------
+        float or np.ndarray of float, shape (d,)
+
+        Raises
+        ------
+        RuntimeError
+            If no chunk has been seen yet.
+
+        Notes
+        -----
+        Time: O(d). Space: O(d).
+        """
+        self._check_fitted()
+        return _finish(np.where(self.n_ > 0, self.max_, np.nan))

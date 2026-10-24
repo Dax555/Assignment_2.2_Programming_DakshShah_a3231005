@@ -1,3 +1,11 @@
+"""
+metrics.py
+Metrics for scoring a model's predictions.
+Classification: accuracy, precision, recall, f1, confusion_matrix.
+Regression: mse. Binary classification: roc_curve, auc, roc_auc_score.
+All functions are vectorised and work with any label type, including strings.
+"""
+
 import numpy as np
 
 __all__ = [
@@ -80,6 +88,11 @@ def _prf(y_true, y_pred, average, pos_label, labels, zero_division):
         labels = np.asarray(labels)
 
     if average == "binary":
+        if labels.size > 2:
+            raise ValueError(
+                f"average='binary' needs at most 2 classes, got {labels.size} "
+                f"{labels.tolist()}. Use average='macro', 'micro' or 'weighted'"
+            )
         if not np.any(labels == pos_label):
             raise ValueError(
                 f"pos_label={pos_label!r} is not one of the labels "
@@ -217,7 +230,7 @@ def precision(
     ------
     ValueError
         Bad input, unknown average, or pos_label not one of the classes.
-
+        Also raised for average="binary" when there are more than 2 classes, since the other classes would be silently ignored.
     Notes
     -----
     O(n log n) time, O(n + k) space for k classes.
@@ -308,8 +321,8 @@ def mse(y_true, y_pred, axis=None):
     Raises
     ------
     ValueError
-        Shapes don't match, empty input, or NaN. NaN raises instead of being skipped, since skipping missing predictions would make the model look better than it is.
-
+        Shapes don't match, empty input, NaN or infinity. NaN raises instead of being skipped, since skipping missing predictions would make the model look better than it is.
+        Infinity raises because the error would just be inf (or NaN for inf - inf), which says nothing useful.
     Notes
     -----
     O(n*m) time and space.
@@ -330,6 +343,8 @@ def mse(y_true, y_pred, axis=None):
         raise ValueError("y_true and y_pred must not be empty")
     if np.isnan(y_true).any() or np.isnan(y_pred).any():
         raise ValueError("y_true and y_pred must not contain NaN")
+    if np.isinf(y_true).any() or np.isinf(y_pred).any():
+        raise ValueError("y_true and y_pred must not contain infinity")
     err = np.mean((y_true - y_pred) ** 2, axis=axis)
     return float(err) if axis is None else err
 
@@ -361,8 +376,8 @@ def roc_curve(y_true, y_score, pos_label=1):
     Raises
     ------
     ValueError
-        Bad input, more than two classes, or y_true doesn't have both positives and negatives (one of the rates would be 0/0).
-
+        Bad input, more than two classes, infinite scores, or y_true doesn't have both positives and negatives (one of the rates would be 0/0).
+        Infinite scores raise because they would repeat the inf threshold that marks the start of the curve.
     Notes
     -----
     Sort the scores once, then a cumulative sum gives the TP count at every cut point.
@@ -379,6 +394,8 @@ def roc_curve(y_true, y_score, pos_label=1):
     """
     y_true, y_score = _check_pair(y_true, y_score, ("y_true", "y_score"))
     y_score = y_score.astype(float)
+    if np.isinf(y_score).any():
+        raise ValueError("y_score must not contain infinity")
 
     if np.unique(y_true).size > 2:
         raise ValueError("roc_curve supports binary labels only")

@@ -10,6 +10,8 @@ Conventions
   `axis`; the output of rank and percentile_rank has the shape of the input.
 - rank and percentile_rank reject NaN with ValueError. percentile ignores NaN
   and gives NaN for a slice that has no valid value.
+- percentile takes q in [0, 100] and is computed by stats.quantile (q in
+  [0, 1]), so the two always give the same answer for the same level.
 - No Python loop runs over rows: one stable argsort along the axis, followed
   by cumulative operations.
 - Complexity is given in terms of n, the length of the axis being ranked, and
@@ -18,8 +20,10 @@ Conventions
 
 import numpy as np
 
+from .stats import quantile
+from .utils import INTERPOLATIONS as _INTERPOLATIONS
+
 _METHODS = ("average", "min", "max", "dense", "ordinal")
-_INTERPOLATIONS = ("linear", "lower", "higher", "midpoint")
 
 
 def _check(x, method, axis):
@@ -249,10 +253,16 @@ def percentile(data, q, interpolation="linear", axis=-1):
 
     Notes
     -----
-    Each slice is sorted once (NaN goes last). The position of the percentile
-    is q / 100 * (n_valid - 1), where n_valid counts the non-NaN values of
-    that slice, and the two neighbouring values are combined according to
-    `interpolation`. The results agree with np.percentile / np.nanpercentile.
+    Computed by stats.quantile at level q / 100, so rank.percentile(x, 28)
+    and stats.quantile(x, 0.28) always agree. Each slice is sorted once (NaN
+    goes last). The position of the percentile is q / 100 * (n_valid - 1),
+    where n_valid counts the non-NaN values of that slice; positions within
+    rounding error of a whole number are snapped to it, so 0.28 * 25 picks
+    element 7 and not 8. The two neighbouring values are combined according
+    to `interpolation`. The results agree with np.percentile /
+    np.nanpercentile, except where NumPy's own rounding moves an exact
+    position (np.percentile(np.arange(26.0), 28, method="higher") gives 8.0,
+    here it is 7.0).
 
     Time: O(N log n + Q * S), where S is the number of slices.
     Space: O(N + Q * S).
@@ -263,12 +273,6 @@ def percentile(data, q, interpolation="linear", axis=-1):
     x = np.asarray(data)
     if x.ndim == 0:
         raise ValueError("data must be at least 1-D")
-    try:
-        x = x.astype(float)
-    except (TypeError, ValueError) as exc:
-        raise ValueError(f"data must be numeric ({exc})") from exc
-    if np.isinf(x).any():
-        raise ValueError("data contains infinity; remove or replace it first")
     if not -x.ndim <= axis < x.ndim:
         raise ValueError(f"axis {axis} is out of range for {x.ndim}-D input")
     q_arr = np.asarray(q, dtype=float)
@@ -276,31 +280,5 @@ def percentile(data, q, interpolation="linear", axis=-1):
         raise ValueError("q must be a scalar or 1-D")
     if np.isnan(q_arr).any() or (q_arr < 0).any() or (q_arr > 100).any():
         raise ValueError("q must lie in [0, 100]")
-    scalar_q = q_arr.ndim == 0
-    qs = q_arr.reshape(-1)
-
-    x = np.moveaxis(x, axis, -1)
-    n_valid = (~np.isnan(x)).sum(axis=-1)
-    s = np.sort(x, axis=-1)
-    if s.shape[-1] == 0:
-        out = np.full((len(qs),) + x.shape[:-1], np.nan)
-        return out[0] if scalar_q else out
-
-    qcol = qs.reshape((-1,) + (1,) * n_valid.ndim)
-    pos = qcol / 100.0 * (np.maximum(n_valid, 1) - 1)
-    lo = np.floor(pos).astype(np.intp)
-    hi = np.ceil(pos).astype(np.intp)
-    big = np.broadcast_to(s, (len(qs),) + s.shape)
-    v_lo = np.take_along_axis(big, lo[..., None], axis=-1)[..., 0]
-    v_hi = np.take_along_axis(big, hi[..., None], axis=-1)[..., 0]
-
-    if interpolation == "linear":
-        out = v_lo + (v_hi - v_lo) * (pos - lo)
-    elif interpolation == "lower":
-        out = v_lo
-    elif interpolation == "higher":
-        out = v_hi
-    else:
-        out = (v_lo + v_hi) / 2.0
-    out = np.where(n_valid == 0, np.nan, out)
-    return out[0] if scalar_q else out
+    # stats.quantile does the work, so percentile and quantile can never disagree.
+    return quantile(x, q_arr / 100.0, axis=axis, interpolation=interpolation)

@@ -2,7 +2,7 @@
 import numpy as np
 import pytest
 
-from numcompute import optim
+from numCompute import optim
 
 
 def quad(x):
@@ -121,3 +121,15 @@ def test_jacobian_invalid_inputs_and_inconsistent_output_length():
 
     with pytest.raises(ValueError, match="same number"):
         optim.jacobian(ragged, [1.0, 2.0])
+
+
+def test_relative_step_handles_large_x():
+    f = lambda x: float(x[0] ** 2)
+    x = [1e10]
+    assert optim.grad(f, x, relative=True)[0] == pytest.approx(2e10, rel=1e-6)
+    assert optim.grad(f, x)[0] != pytest.approx(2e10, rel=1e-6)   # fixed h loses accuracy here
+    np.testing.assert_allclose(optim.grad(quad, [1.0, -2.0], relative=True), [2.0, -4.0], rtol=1e-6)
+    np.testing.assert_allclose(optim.jacobian(vec, [1.0, 2.0], relative=True),
+                               optim.jacobian(vec, [1.0, 2.0]), rtol=1e-6)
+    with pytest.raises(TypeError):
+        optim.grad(quad, [1.0], relative="yes")

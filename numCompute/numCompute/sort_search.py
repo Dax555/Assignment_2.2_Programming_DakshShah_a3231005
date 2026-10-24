@@ -6,9 +6,15 @@ Sorting part: stable_sort, multi_key_sort.
 
 Conventions
 -----------
-- All functions operate on 1-D arrays; anything else raises ValueError.
+- stable_sort sorts along `axis` (default -1, the last axis, as in np.sort)
+  of an array of any number of dimensions. multi_key_sort takes 1-D keys or
+  the columns of a 2-D array. topk, quickselect and binary_search operate on
+  1-D arrays; anything else raises ValueError. For several rows at once use
+  utils.topk_along_axis.
 - NaN is treated as "missing". Sorting puts NaN last; top-k, quickselect and
   binary search ignore NaN and emit a UserWarning saying how many were ignored.
+- binary_search expects input that is already sorted (NaN last), as returned
+  by stable_sort or np.sort.
 - Time/space complexity is given in terms of n, the length of the input.
 
 """
@@ -16,7 +22,8 @@ Conventions
 import warnings
 
 import numpy as np
-from .io import load_csv
+
+from .utils import check_axis
 
 
 def _as_1d_array(values, name="values"):
@@ -54,32 +61,36 @@ def _as_1d_array(values, name="values"):
     return arr
 
 
-def stable_sort(values, ascending=True, return_indices=False):
+def stable_sort(values, ascending=True, return_indices=False, axis=-1):
     """
-    Stable sort of a 1-D array, with NaN always placed last.
+    Stable sort along an axis, with NaN always placed last.
 
     Parameters
     ----------
-    values : array_like, shape (n,)
+    values : array_like, at least 1-D
         Data to sort. Any sortable dtype is accepted; only floating dtypes
         can contain NaN.
     ascending : bool, default True
         Sort from smallest to largest if True, otherwise largest to smallest.
     return_indices : bool, default False
         If True, return the sorting permutation instead of the sorted values.
+    axis : int, default -1
+        Axis to sort along; every 1-D slice along it is sorted on its own.
 
     Returns
     -------
-    np.ndarray, shape (n,)
+    np.ndarray, same shape as `values`
         The sorted copy of `values`, or, if `return_indices` is True, an
-        integer array `perm` such that ``values[perm]`` is the sorted result.
+        integer array `perm` such that
+        ``np.take_along_axis(values, perm, axis)`` is the sorted result
+        (``values[perm]`` for 1-D input).
 
     Raises
     ------
     TypeError
-        If `ascending` is not a bool.
+        If `ascending` is not a bool, or `axis` is not an integer.
     ValueError
-        If `values` is not 1-D.
+        If `values` is 0-D, or `axis` is out of range.
 
     Notes
     -----
@@ -87,32 +98,36 @@ def stable_sort(values, ascending=True, return_indices=False):
     ascending and descending mode. NaN values are placed after all other
     values in either mode, also in their original relative order.
 
-    Time: O(n log n). Space: O(n).
+    One np.argsort(kind="stable") call sorts every slice. NumPy already puts
+    NaN last, so descending order sorts a reversed key instead of reversing
+    the result: -x for floats (NaN stays NaN) and ~x for integers (no
+    overflow, unlike -x). Other dtypes (e.g. strings) cannot hold NaN and use
+    the reversed-array trick.
+
+    Time: O(N log n) for N elements and n the length of `axis`. Space: O(N).
     """
     if not isinstance(ascending, (bool, np.bool_)):
         raise TypeError(f"ascending must be a bool, got {type(ascending).__name__}")
 
-    arr = _as_1d_array(values)
-
-    if np.issubdtype(arr.dtype, np.floating):
-        nan_mask = np.isnan(arr)
-    else:
-        nan_mask = np.zeros(arr.shape, dtype=bool)
-
-    nan_idx = np.flatnonzero(nan_mask)
-    ok_idx = np.flatnonzero(~nan_mask)
-    ok_vals = arr[ok_idx]
+    arr = np.asarray(values)
+    if arr.ndim == 0:
+        raise ValueError("values must be at least 1-D, got a scalar")
+    axis = check_axis(axis, arr.ndim)
 
     if ascending:
-        local = np.argsort(ok_vals, kind="stable")
+        perm = np.argsort(arr, axis=axis, kind="stable")
+    elif arr.dtype.kind == "f":
+        perm = np.argsort(-arr, axis=axis, kind="stable")
+    elif arr.dtype.kind in "iub":
+        perm = np.argsort(~arr, axis=axis, kind="stable")
     else:
-        m = ok_vals.shape[0]
-        rev_order = np.argsort(ok_vals[::-1], kind="stable")
-        local = ((m - 1) - rev_order)[::-1]
+        # Sort the reversed slices and map the positions back, so ties keep
+        # their original order.
+        n = arr.shape[axis]
+        rev_order = np.argsort(np.flip(arr, axis), axis=axis, kind="stable")
+        perm = np.flip((n - 1) - rev_order, axis)
 
-    perm = np.concatenate([ok_idx[local], nan_idx])
-
-    return perm if return_indices else arr[perm]
+    return perm if return_indices else np.take_along_axis(arr, perm, axis=axis)
 
 
 def multi_key_sort(keys, ascending=True):
@@ -124,9 +139,11 @@ def multi_key_sort(keys, ascending=True):
 
     Parameters
     ----------
-    keys : sequence of array_like, each of shape (n,)
+    keys : sequence of array_like, each of shape (n,), or np.ndarray of shape (n, K)
         The sort keys, most significant first. All keys must have the same
-        length n and at least one key is required.
+        length n and at least one key is required. A 2-D NumPy array is read
+        column by column: column 0 is the primary key, column 1 the next, and
+        so on (so rows are sorted like a table).
     ascending : bool or sequence of bool, default True
         A single bool applies to every key; a sequence must hold one bool per
         key so that each key can have its own direction.
@@ -140,8 +157,9 @@ def multi_key_sort(keys, ascending=True):
     Raises
     ------
     ValueError
-        If `keys` is empty, a key is not 1-D, the keys differ in length, or
-        `ascending` is a sequence whose length differs from the number of keys.
+        If `keys` is empty (or a 2-D array with no columns), a key is not 1-D,
+        the keys differ in length, or `ascending` is a sequence whose length
+        differs from the number of keys.
     TypeError
         If an entry of `ascending` is not a bool.
 
@@ -152,6 +170,9 @@ def multi_key_sort(keys, ascending=True):
 
     Time: O(K n log n) for K keys. Space: O(n).
     """
+    if isinstance(keys, np.ndarray) and keys.ndim == 2:
+        # Each column of a 2-D array is one key, the first column most significant.
+        keys = list(keys.T)
     if len(keys) == 0:
         raise ValueError("keys must contain at least one array")
 
@@ -409,74 +430,109 @@ def quickselect(values, k):
             work = work[work > pivot]
 
 
-def binary_search(values, x, return_index=True):
+def binary_search(sorted_values, x, return_index=True, method="loop", check_sorted=False):
     """
-    Binary search for x in a 1-D array after a stable sort of its values.
+    Binary search for x in a 1-D array that is already sorted in ascending order.
 
-    Returns (index, found) with the leftmost insertion index in the sorted
-    array, or (value, found) with the matching value (None if absent) when
-    return_index is False. NaNs in values are ignored with a warning.
+    Returns (index, found) with the leftmost insertion index, or
+    (value, found) with the matching value (None if absent) when
+    return_index is False. NaNs at the end of the array are ignored with a
+    warning.
 
     Parameters
     ----------
-    values : array_like, shape (n,)
-        Data to search. It does not need to be sorted; it is sorted
-        internally. NaN values are ignored.
+    sorted_values : array_like, shape (n,)
+        Data sorted in ascending order, with any NaN at the end (as returned
+        by stable_sort or np.sort). It is not sorted here; pass
+        check_sorted=True to have this checked.
     x : scalar
         Value to look for. Must not be NaN.
     return_index : bool, default True
         If True, return the insertion index; if False, return the matching
         value (or None).
+    method : {"loop", "searchsorted"}, default "loop"
+        "loop" is a hand-written binary search, "searchsorted" uses
+        np.searchsorted. Both give the same answer.
+    check_sorted : bool, default False
+        If True, first check that `sorted_values` is sorted with NaN only at
+        the end. This costs O(n), so it is off by default.
 
     Returns
     -------
     index : int
-        Leftmost position at which `x` could be inserted to keep the sorted,
-        NaN-free array ordered. This is a position in the sorted array, not
-        in the original `values`. Returned if `return_index` is True.
+        Leftmost position at which `x` could be inserted to keep
+        `sorted_values` ordered (ignoring the NaNs at the end). Returned if
+        `return_index` is True.
     value : scalar or None
-        The element equal to `x` in the sorted array, or None if absent.
-        Returned instead of `index` if `return_index` is False.
+        The element equal to `x`, or None if absent. Returned instead of
+        `index` if `return_index` is False.
     found : bool
-        True if `x` occurs in `values`.
+        True if `x` occurs in `sorted_values`.
 
     Raises
     ------
     TypeError
-        If `return_index` is not a bool.
+        If `return_index` or `check_sorted` is not a bool.
     ValueError
-        If `x` is not a scalar, `x` is NaN, or `values` is not 1-D.
+        If `x` is not a scalar, `x` is NaN, `sorted_values` is not 1-D,
+        `method` is unknown, or `check_sorted` is True and the input is not
+        sorted.
 
     Warns
     -----
     UserWarning
-        If `values` contains NaN.
+        If `sorted_values` ends with NaN.
 
     Notes
     -----
-    Time: O(n log n) for the sort plus O(log n) for the search.
-    Space: O(n).
+    The input is not sorted here; unsorted input gives a meaningless answer
+    unless check_sorted=True catches it. The number of NaNs is found with a
+    second binary search (NaN sorts last), so no O(n) scan is needed.
+
+    Time: O(log n), or O(n) with check_sorted=True.
+    Space: O(1).
     """
     if not isinstance(return_index, (bool, np.bool_)):
         raise TypeError(f"return_index must be a bool, got {type(return_index).__name__}")
+    if not isinstance(check_sorted, (bool, np.bool_)):
+        raise TypeError(f"check_sorted must be a bool, got {type(check_sorted).__name__}")
+    if method not in ("loop", "searchsorted"):
+        raise ValueError(f"method must be 'loop' or 'searchsorted', got {method!r}")
     if np.ndim(x) != 0:
         raise ValueError("x must be a scalar")
     if isinstance(x, (float, np.floating)) and np.isnan(x):
         raise ValueError("x must not be NaN")
 
-    arr = _as_1d_array(values)
-    sorted_vals = stable_sort(arr[_valid_positions(arr, "binary_search")])
+    arr = _as_1d_array(sorted_values, "sorted_values")
+    n = arr.shape[0]
+    if np.issubdtype(arr.dtype, np.floating) and n and np.isnan(arr[-1]):
+        # NaN sorts last, so the valid values are the ones before the first NaN.
+        n = int(np.searchsorted(arr, np.nan, side="left"))
+        warnings.warn(
+            f"binary_search: ignoring {arr.shape[0] - n} NaN value(s) out of {arr.shape[0]}",
+            UserWarning,
+            stacklevel=2,
+        )
+    valid = arr[:n]
 
-    low, high = 0, sorted_vals.shape[0]
-    while low < high:
-        mid = (low + high) // 2
-        if sorted_vals[mid] < x:
-            low = mid + 1
-        else:
-            high = mid
+    if check_sorted:
+        has_nan = np.issubdtype(valid.dtype, np.floating) and np.isnan(valid).any()
+        if has_nan or np.any(valid[1:] < valid[:-1]):
+            raise ValueError("sorted_values must be sorted in ascending order with NaN last")
 
-    found = bool(low < sorted_vals.shape[0] and sorted_vals[low] == x)
+    if method == "searchsorted":
+        low = int(np.searchsorted(valid, x, side="left"))
+    else:
+        low, high = 0, n
+        while low < high:
+            mid = (low + high) // 2
+            if valid[mid] < x:
+                low = mid + 1
+            else:
+                high = mid
+
+    found = bool(low < n and valid[low] == x)
 
     if return_index:
         return low, found
-    return (sorted_vals[low] if found else None), found
+    return (valid[low] if found else None), found

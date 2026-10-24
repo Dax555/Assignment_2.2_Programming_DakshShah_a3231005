@@ -2,7 +2,7 @@
 import numpy as np
 import pytest
 
-from numcompute import sort_search as ss
+from numCompute import sort_search as ss
 
 
 def test_stable_sort_matches_numpy_both_directions():
@@ -33,9 +33,33 @@ def test_stable_sort_empty_all_equal_and_non_contiguous():
     np.testing.assert_array_equal(ss.stable_sort(view), np.sort(view))
 
 
+def test_stable_sort_along_axis_of_2d_array():
+    a = np.array([[3.0, np.nan, 1.0], [2.0, 2.0, 5.0]])
+    np.testing.assert_array_equal(ss.stable_sort(a, axis=0), np.sort(a, axis=0))
+    np.testing.assert_array_equal(ss.stable_sort(a[1:], axis=1), [[2.0, 2.0, 5.0]])
+    down = ss.stable_sort(a, ascending=False, axis=1)
+    np.testing.assert_array_equal(down[0, :2], [3.0, 1.0])
+    assert np.isnan(down[0, 2])                                # NaN still last
+    np.testing.assert_array_equal(ss.stable_sort(a, False, True, axis=1)[1], [2, 0, 1])
+
+
+def test_stable_sort_descending_strings_and_extreme_ints():
+    np.testing.assert_array_equal(ss.stable_sort(["b", "a", "c"], ascending=False), ["c", "b", "a"])
+    big = np.array([np.iinfo(np.int64).min, 0, np.iinfo(np.int64).max])
+    np.testing.assert_array_equal(ss.stable_sort(big, ascending=False), big[::-1])
+
+
+def test_multi_key_sort_columns_of_2d_array():
+    table = np.array([[2, 1], [1, 9], [2, 0], [1, 3]])
+    np.testing.assert_array_equal(ss.multi_key_sort(table), [3, 1, 2, 0])
+    np.testing.assert_array_equal(ss.multi_key_sort(table, [True, False]), [1, 3, 0, 2])
+
+
 def test_stable_sort_invalid_inputs():
     with pytest.raises(ValueError):
-        ss.stable_sort(np.ones((2, 2)))
+        ss.stable_sort(5.0)                                    # 0-D
+    with pytest.raises(ValueError):
+        ss.stable_sort(np.ones((2, 2)), axis=2)
     with pytest.raises(TypeError):
         ss.stable_sort([1, 2], ascending="yes")
 
@@ -123,20 +147,32 @@ def test_quickselect_invalid_inputs():
 
 
 def test_binary_search_found_missing_and_leftmost_duplicate():
-    assert ss.binary_search([3, 1, 2, 5], 2) == (1, True)
-    assert ss.binary_search([3, 1, 2, 5], 4) == (3, False)     # insertion point
+    assert ss.binary_search([1, 2, 3, 5], 2) == (1, True)
+    assert ss.binary_search([1, 2, 3, 5], 4) == (3, False)     # insertion point
     assert ss.binary_search([1, 2, 2, 2, 3], 2) == (1, True)   # leftmost
-    assert ss.binary_search([3, 1, 2], 2, return_index=False) == (2, True)
-    assert ss.binary_search([3, 1, 2], 7, return_index=False) == (None, False)
+    assert ss.binary_search([1, 2, 3], 2, return_index=False) == (2, True)
+    assert ss.binary_search([1, 2, 3], 7, return_index=False) == (None, False)
 
 
-def test_binary_search_agrees_with_searchsorted_empty_and_nan():
-    a = np.random.default_rng(4).integers(0, 30, 100)
+@pytest.mark.parametrize("method", ["loop", "searchsorted"])
+def test_binary_search_agrees_with_searchsorted_empty_and_nan(method):
+    a = np.sort(np.random.default_rng(4).integers(0, 30, 100))
     for x in range(-2, 33):
-        assert ss.binary_search(a, x)[0] == np.searchsorted(np.sort(a), x, side="left")
-    assert ss.binary_search([], 1) == (0, False)
+        assert ss.binary_search(a, x, method=method)[0] == np.searchsorted(a, x, side="left")
+    assert ss.binary_search([], 1, method=method) == (0, False)
     with pytest.warns(UserWarning):
-        assert ss.binary_search([np.nan, 2.0, 1.0], 2.0) == (1, True)
+        assert ss.binary_search([1.0, 2.0, np.nan], 2.0, method=method) == (1, True)
+    with pytest.warns(UserWarning):
+        assert ss.binary_search([1.0, 2.0, np.nan], 9.0, method=method) == (2, False)
+
+
+def test_binary_search_does_not_sort_and_check_sorted_catches_it():
+    assert ss.binary_search(ss.stable_sort([3, 1, 2, 5]), 2) == (1, True)
+    with pytest.raises(ValueError):
+        ss.binary_search([3, 1, 2], 2, check_sorted=True)
+    with pytest.raises(ValueError):
+        ss.binary_search([1.0, np.nan, 2.0], 2.0, check_sorted=True)
+    assert ss.binary_search([1, 2, 3], 3, check_sorted=True) == (2, True)
 
 
 def test_binary_search_invalid_inputs():
@@ -146,3 +182,5 @@ def test_binary_search_invalid_inputs():
         ss.binary_search([1, 2], [1])
     with pytest.raises(TypeError):
         ss.binary_search([1, 2], 1, return_index="yes")
+    with pytest.raises(ValueError):
+        ss.binary_search([1, 2], 1, method="linear")

@@ -2,7 +2,7 @@
 import numpy as np
 import pytest
 
-from numcompute import stats
+from numCompute import stats
 
 
 def test_count_ignores_nan_and_supports_axis():
@@ -135,3 +135,55 @@ def test_format_summary_and_format_histogram():
     assert len(bars) == 3 and bars[-1].count("#") == 10
     with pytest.raises(ValueError):
         stats.format_histogram(c, e[:-1])
+
+
+
+
+def test_mean_does_not_overflow_and_stays_exact():
+    assert stats.mean([1e308, 1e308]) == 1e308
+    a = np.random.default_rng(3).normal(5, 2, 1000)
+    assert stats.mean(a) == pytest.approx(a.mean(), rel=1e-15)
+
+
+def test_three_dimensional_input_reduces_along_axis():
+    a = np.random.default_rng(5).normal(size=(2, 3, 4))
+    np.testing.assert_allclose(stats.mean(a, axis=1), a.mean(axis=1))
+    np.testing.assert_allclose(stats.var(a, axis=2, ddof=1), a.var(axis=2, ddof=1))
+    np.testing.assert_allclose(stats.quantile(a, 0.3, axis=0), np.quantile(a, 0.3, axis=0))
+    with pytest.raises(ValueError):
+        stats.describe(a)                                    # describe is 1-D/2-D only
+
+
+def test_min_and_max_are_not_exported_by_star_import():
+    assert "min" not in stats.__all__ and "max" not in stats.__all__
+    assert stats.min([3.0, 1.0]) == 1.0                      # still callable as stats.min
+
+
+def test_running_stats_matches_batch_results():
+    rng = np.random.default_rng(6)
+    X = rng.normal(1e6, 3.0, (500, 3))                       # large mean, small spread
+    X[rng.random(X.shape) < 0.1] = np.nan
+    rs = stats.RunningStats()
+    for chunk in np.array_split(X, 7):
+        rs.partial_fit(chunk)
+    rs.update(np.empty((0, 3)))                              # an empty chunk changes nothing
+    np.testing.assert_array_equal(rs.count(), stats.count(X, axis=0))
+    np.testing.assert_allclose(rs.mean(), stats.mean(X, axis=0), rtol=1e-12)
+    np.testing.assert_allclose(rs.var(ddof=1), stats.var(X, axis=0, ddof=1), rtol=1e-9)
+    np.testing.assert_allclose(rs.std(), stats.std(X, axis=0), rtol=1e-9)
+    np.testing.assert_array_equal(rs.min(), stats.min(X, axis=0))
+    np.testing.assert_array_equal(rs.max(), stats.max(X, axis=0))
+
+
+def test_running_stats_one_dimensional_and_errors():
+    rs = stats.RunningStats()
+    with pytest.raises(RuntimeError):
+        rs.mean()
+    rs.update([1.0, 2.0]).update([np.nan, 6.0])
+    assert rs.count() == 3 and rs.mean() == 3.0
+    assert np.isnan(rs.var(ddof=3))                          # n - ddof <= 0
+    with pytest.raises(ValueError):
+        rs.update([[1.0, 2.0]])                              # shape changed
+    with pytest.raises(ValueError):
+        rs.update([np.inf])
+    assert np.isnan(rs.reset().update([np.nan]).mean())

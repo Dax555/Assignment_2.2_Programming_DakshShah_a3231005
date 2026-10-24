@@ -1,6 +1,6 @@
 import numpy as np
 
-from numCompute.numCompute.preprocessing import (StandardScaler, MinMaxScaler, Imputer,
+from numCompute.preprocessing import (StandardScaler, MinMaxScaler, Imputer,
                                       OneHotEncoder, ColumnTransformer)
 
 
@@ -265,6 +265,40 @@ def test_column_transformer_errors():
     ct = ColumnTransformer(StandardScaler(), None, [5], [])
     assert raises(ValueError, lambda: ct.fit(np.zeros((2, 2), dtype=object)))
     assert raises(RuntimeError, lambda: ColumnTransformer(StandardScaler(), None, [0], []).transform([[1.0]]))
+
+
+# ---------------------------------------------------------------- Pipeline use
+def test_transformers_work_inside_pipeline_given_y():
+    from numCompute.pipeline import Pipeline, Transformer
+    X = make_data(seed=2, nan_frac=0.0)
+    y = np.arange(X.shape[0])
+    for t in (StandardScaler(), MinMaxScaler(), Imputer(), OneHotEncoder(), ColumnTransformer(StandardScaler(), None, [0], [])):
+        assert isinstance(t, Transformer)
+    pipe = Pipeline([("impute", Imputer()), ("scale", StandardScaler())])
+    assert np.allclose(pipe.fit(X, y).transform(X), StandardScaler().fit_transform(X))
+
+
+def test_imputer_most_frequent_streaming_matches_batch():
+    chunks = [np.array([["b"], ["a"]], dtype=object), np.array([["b"], [""]], dtype=object),
+              np.array([["a"], ["a"]], dtype=object)]
+    streamed = Imputer("most_frequent")
+    for c in chunks:
+        streamed.update(c)
+    batch = Imputer("most_frequent").fit(np.vstack(chunks))
+    assert streamed.statistics_ == batch.statistics_ == ["a"]
+    X = np.array([[1.0, 5.0], [1.0, np.nan], [2.0, 5.0], [2.0, 7.0]])
+    assert Imputer("most_frequent").fit(X).statistics_ == [1.0, 5.0]   # tie goes to the smaller value
+
+
+def test_onehot_unknown_error_names_the_right_column():
+    enc = OneHotEncoder(handle_unknown="error").fit([["r", "x"], ["g", "y"]])
+    assert np.array_equal(enc.transform([["g", "x"], ["", "y"]]), [[1, 0, 1, 0], [0, 0, 0, 1]])
+    try:
+        enc.transform([["g", "z"]])
+    except ValueError as e:
+        assert "column 1" in str(e) and "'z'" in str(e)
+    else:
+        raise AssertionError("expected ValueError")
 
 
 if __name__ == "__main__":
