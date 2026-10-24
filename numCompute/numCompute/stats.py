@@ -13,7 +13,6 @@ Conventions
 - Time/space complexity is given in terms of N, the total number of elements
   of the input.
 
-Author(s): <team member name(s)>
 """
 
 import numpy as np
