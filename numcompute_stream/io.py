@@ -392,6 +392,7 @@ def load_mixed_csv(
     text_cols = [c for c in range(n_total) if c not in set(numeric_cols)]
 
     def parse(cols, dtype, fill_value):
+        """Read the given columns as one array, or return None if there are none."""
         if not cols:
             return None
         # always fill here; rows are skipped below, using both parts' gaps
