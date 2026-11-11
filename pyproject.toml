@@ -1,0 +1,30 @@
+[build-system]
+requires = ["setuptools>=61"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "numcompute-stream"
+version = "0.2.0"
+description = "NumCompute-Stream: a NumPy-only, decision-tree-based streaming machine learning toolkit."
+readme = "README.md"
+requires-python = ">=3.9"
+dependencies = ["numpy>=1.22", "matplotlib>=3.5"]
+keywords = ["numpy", "streaming", "decision-tree", "online-learning", "machine-learning"]
+classifiers = [
+    "Programming Language :: Python :: 3",
+    "Operating System :: OS Independent",
+    "Intended Audience :: Education",
+    "Topic :: Scientific/Engineering",
+]
+
+[project.optional-dependencies]
+dev = ["pytest>=7", "jupyter"]
+
+[tool.setuptools.packages.find]
+# this file sits at the repository root, next to the package folder
+include = ["numcompute_stream*"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+python_files = ["test_*.py"]
+pythonpath = ["."]
