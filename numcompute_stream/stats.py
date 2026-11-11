@@ -2,8 +2,14 @@
 stats.py
 ========
 Descriptive statistics built using NumPy: count, mean, var, std, min, max,
-quantile, median, mode, histogram, a describe() summary, and RunningStats
-for streaming (Welford) statistics.
+quantile, median, mode, histogram, a describe() summary, and chunk-based
+(streaming) versions of all of them:
+
+- RunningStats        count, mean, variance, std, min, max (Welford / Chan)
+- StreamingQuantile   quantiles from a reservoir sample or a sliding window
+- StreamingHistogram  fixed-edge histogram, optionally over a sliding window
+- StreamStats         all of the above behind one update_stats(X_chunk) call
+- update_stats        the same as a function: state = update_stats(chunk, state)
 
 Conventions
 -----------
@@ -30,6 +36,7 @@ __all__ = [
     "count", "mean", "var", "std", "quantile", "median",
     "mode", "histogram", "describe", "describe_categorical",
     "format_summary", "format_histogram", "RunningStats",
+    "StreamingQuantile", "StreamingHistogram", "StreamStats", "update_stats",
 ]
 
 def _as_float_array(data, name="data"):
@@ -1111,6 +1118,7 @@ class RunningStats:
         return self
 
     update = partial_fit
+    update_stats = partial_fit
 
     def _check_fitted(self):
         """
@@ -1262,3 +1270,662 @@ class RunningStats:
         """
         self._check_fitted()
         return _finish(np.where(self.n_ > 0, self.max_, np.nan))
+
+
+# ---------------------------------------------------------------------------
+# Streaming quantiles, histograms and the update_stats API
+# ---------------------------------------------------------------------------
+def _check_positive_int(value, name, allow_none=False):
+    """
+    Validate a positive integer option.
+
+    Parameters
+    ----------
+    value : object
+        Value to check.
+    name : str
+        Option name for error messages.
+    allow_none : bool, default False
+        Whether None is accepted.
+
+    Returns
+    -------
+    int or None
+
+    Raises
+    ------
+    TypeError
+        If `value` is not an integer.
+    ValueError
+        If `value` < 1.
+
+    Notes
+    -----
+    Time: O(1). Space: O(1).
+    """
+    if value is None and allow_none:
+        return None
+    if isinstance(value, (bool, np.bool_)) or not isinstance(value, (int, np.integer)):
+        raise TypeError(f"{name} must be a positive integer, got {value!r}")
+    if value < 1:
+        raise ValueError(f"{name} must be >= 1, got {value}")
+    return int(value)
+
+
+def _as_chunk(data, shape, owner):
+    """
+    Validate one chunk for a streaming statistic.
+
+    Parameters
+    ----------
+    data : array_like, shape (n,) or (n, d)
+        Chunk of numbers; NaN allowed, infinity rejected.
+    shape : tuple or None
+        Trailing shape fixed by the first chunk (() or (d,)), or None.
+    owner : str
+        Class name for error messages.
+
+    Returns
+    -------
+    np.ndarray of float, shape (n,) or (n, d)
+
+    Raises
+    ------
+    ValueError
+        If the chunk is not numeric, contains infinity, is not 1-D or 2-D, or
+        has a different number of columns than the first chunk.
+
+    Notes
+    -----
+    Time: O(n d). Space: O(1) if already float.
+    """
+    arr = _as_float_array(data)
+    if arr.ndim > 2:
+        raise ValueError(f"{owner}: a chunk must be 1-D or 2-D, got shape {arr.shape}")
+    if shape is not None and arr.shape[1:] != shape:
+        raise ValueError(
+            f"{owner}: chunk has shape {arr.shape}, expected (n,) + {shape} "
+            "as set by the first chunk"
+        )
+    return arr
+
+
+class StreamingQuantile:
+    """
+    Quantiles of a stream, updated one chunk at a time.
+
+    An exact quantile needs all of the data, which a stream cannot keep. Two
+    bounded-memory modes are offered:
+
+    - whole stream (``window=None``): a uniform random sample of at most
+      `capacity` rows is kept by reservoir sampling, and the quantile of that
+      sample is returned. While the stream is shorter than `capacity` the
+      result is exact; afterwards it is an estimate whose error shrinks like
+      1 / sqrt(capacity).
+    - sliding window (``window=N``): the N most recent rows are kept and
+      their exact quantile is returned.
+
+    Parameters
+    ----------
+    capacity : int, default 4096
+        Reservoir size in rows (whole-stream mode).
+    window : int, optional
+        Sliding-window length in rows. Default: the whole stream.
+    seed : int or None, default 0
+        Seed of the reservoir's random generator, so runs are reproducible.
+
+    Attributes
+    ----------
+    n_seen_ : int
+        Rows received so far.
+
+    Notes
+    -----
+    Chunks are 1-D, or 2-D (n, d) with one quantile per column; rows are
+    sampled whole, so columns stay aligned. NaN is ignored when the quantile
+    is taken, and infinity is rejected, as in the rest of this module.
+
+    The reservoir update is vectorised: row number i (0-based, counted over
+    the whole stream) draws a slot j uniformly from [0, i] and replaces slot
+    j if j < capacity. That is Vitter's Algorithm R applied to a whole chunk
+    with one random draw and one fancy assignment.
+    """
+
+    def __init__(self, capacity=4096, window=None, seed=0):
+        """
+        Create an empty quantile sketch; see the class docstring.
+
+        Raises
+        ------
+        TypeError, ValueError
+            If `capacity` or `window` is not a positive integer.
+
+        Notes
+        -----
+        Time: O(1). Space: O(1).
+        """
+        self.capacity = _check_positive_int(capacity, "capacity")
+        self.window = _check_positive_int(window, "window", allow_none=True)
+        self.seed = seed
+        self.reset()
+
+    def reset(self):
+        """
+        Forget everything seen so far.
+
+        Returns
+        -------
+        StreamingQuantile
+            The same object (`self`).
+
+        Notes
+        -----
+        Time: O(1). Space: O(1).
+        """
+        self._rows = None
+        self._shape = None
+        self.n_seen_ = 0
+        self._rng = np.random.default_rng(self.seed)
+        return self
+
+    def update(self, data):
+        """
+        Add one chunk.
+
+        Parameters
+        ----------
+        data : array_like, shape (n,) or (n, d)
+            Chunk of numbers. May have n = 0.
+
+        Returns
+        -------
+        StreamingQuantile
+            The same object (`self`).
+
+        Raises
+        ------
+        ValueError
+            As for RunningStats.partial_fit.
+
+        Notes
+        -----
+        `partial_fit` is an alias.
+        Time: O(n d). Space: O(min(capacity, window) d) stored.
+        """
+        arr = _as_chunk(data, self._shape, "StreamingQuantile")
+        if self._shape is None:
+            self._shape = arr.shape[1:]
+            self._rows = np.empty((0,) + self._shape)
+        n = arr.shape[0]
+        if n == 0:
+            return self
+        if self.window is not None:
+            self._rows = np.concatenate([self._rows, arr])[-self.window:]
+            self.n_seen_ += n
+            return self
+        # fill the reservoir first, then replace slots at random
+        room = self.capacity - self._rows.shape[0]
+        if room > 0:
+            self._rows = np.concatenate([self._rows, arr[:room]])
+        # note: this module defines its own min/max, so the built-ins are avoided
+        rest = arr[room:] if room > 0 else arr
+        first = self.n_seen_ + (n - rest.shape[0])
+        if rest.shape[0]:
+            index = first + np.arange(rest.shape[0])
+            slot = self._rng.integers(0, index + 1)
+            keep = slot < self.capacity
+            self._rows[slot[keep]] = rest[keep]
+        self.n_seen_ += n
+        return self
+
+    partial_fit = update
+
+    def result(self, q=0.5, interpolation="linear"):
+        """
+        Current quantile estimate.
+
+        Parameters
+        ----------
+        q : float or array_like of float in [0, 1], default 0.5
+            Quantile(s) to compute.
+        interpolation : {"linear", "lower", "higher", "midpoint"}
+            As in quantile().
+
+        Returns
+        -------
+        float or np.ndarray
+            Shape q.shape for 1-D chunks, q.shape + (d,) for 2-D chunks.
+            NaN where no valid value has been seen.
+
+        Raises
+        ------
+        RuntimeError
+            If no chunk has been seen yet.
+        ValueError
+            If `q` is outside [0, 1] or `interpolation` is unknown.
+
+        Notes
+        -----
+        Time: O(m log m) for m stored rows. Space: O(m d).
+        """
+        if self._shape is None:
+            raise RuntimeError("StreamingQuantile has seen no data; call update first")
+        if self._rows.shape[0] == 0:
+            shape = np.shape(q) + self._shape
+            return _finish(np.full(shape, np.nan))
+        return quantile(self._rows, q, axis=0, interpolation=interpolation)
+
+
+class StreamingHistogram:
+    """
+    Histogram of a stream with fixed bin edges, updated one chunk at a time.
+
+    Parameters
+    ----------
+    bins : int or array_like of float, default 10
+        Number of equal-width bins over `range`, or B + 1 increasing edges.
+    range : (float, float), optional
+        (low, high) of the histogram. Required when `bins` is an integer,
+        because the edges of a stream must be fixed before the data arrives.
+    window : int, optional
+        Sliding window: only the `window` most recent values are counted.
+        Default: the whole stream.
+
+    Attributes
+    ----------
+    edges_ : np.ndarray of float, shape (B + 1,)
+        Bin edges. Bins are half-open [a, b) except the last, which includes
+        its right edge (the same rule as histogram()).
+    n_below_, n_above_, n_nan_ : int
+        Values below the first edge, above the last edge, and NaN values
+        (whole-stream mode: since the last reset; window mode: inside the
+        window). They are not part of the counts.
+    n_seen_ : int
+        Values received so far.
+
+    Notes
+    -----
+    Data of any shape is flattened: the histogram describes one stream of
+    numbers. Whole-stream mode stores only the B counts; window mode stores
+    the last `window` values and recounts them.
+    """
+
+    def __init__(self, bins=10, range=None, window=None):
+        """
+        Create an empty histogram; see the class docstring.
+
+        Raises
+        ------
+        ValueError
+            If `bins` is an integer and `range` is missing or invalid, or the
+            edges are not finite and strictly increasing.
+        TypeError
+            If `window` is not a positive integer.
+
+        Notes
+        -----
+        Time: O(B). Space: O(B).
+        """
+        if isinstance(bins, (int, np.integer)) and not isinstance(bins, (bool, np.bool_)):
+            if bins < 1:
+                raise ValueError(f"bins must be >= 1, got {bins}")
+            if range is None:
+                raise ValueError(
+                    "StreamingHistogram needs range=(low, high) when bins is an "
+                    "integer: the edges must be fixed before the stream starts"
+                )
+            low, high = (float(v) for v in range)
+            if not (np.isfinite(low) and np.isfinite(high) and low < high):
+                raise ValueError(f"range must be finite with low < high, got {range!r}")
+            edges = np.linspace(low, high, int(bins) + 1)
+        else:
+            if range is not None:
+                raise ValueError("range is only allowed when bins is an integer")
+            edges = np.asarray(bins, dtype=float)
+            if edges.ndim != 1 or edges.size < 2:
+                raise ValueError("bin edges must be a 1-D array with at least 2 values")
+            if not np.isfinite(edges).all() or np.any(np.diff(edges) <= 0):
+                raise ValueError("bin edges must be finite and strictly increasing")
+        self.edges_ = edges
+        self.window = _check_positive_int(window, "window", allow_none=True)
+        self.reset()
+
+    def reset(self):
+        """
+        Forget everything seen so far (the edges are kept).
+
+        Returns
+        -------
+        StreamingHistogram
+            The same object (`self`).
+
+        Notes
+        -----
+        Time: O(B). Space: O(B).
+        """
+        self._counts = np.zeros(self.edges_.size - 1, dtype=np.int64)
+        self._below = self._above = self._nan = 0
+        self._values = None
+        self.n_seen_ = 0
+        return self
+
+    def _count(self, values):
+        """
+        Count values into the bins.
+
+        Parameters
+        ----------
+        values : np.ndarray of float, shape (n,)
+
+        Returns
+        -------
+        counts : np.ndarray of int64, shape (B,)
+        below, above, nan : int
+
+        Notes
+        -----
+        One searchsorted and one bincount; no loop over values.
+        Time: O(n log B). Space: O(n + B).
+        """
+        nan = np.isnan(values)
+        x = values[~nan]
+        low, high = self.edges_[0], self.edges_[-1]
+        below, above = x < low, x > high
+        inside = x[~(below | above)]
+        idx = np.searchsorted(self.edges_, inside, side="right") - 1
+        idx = np.minimum(idx, self._counts.size - 1)   # right edge joins the last bin
+        counts = np.bincount(idx, minlength=self._counts.size).astype(np.int64)
+        return counts, int(below.sum()), int(above.sum()), int(nan.sum())
+
+    def update(self, data):
+        """
+        Add one chunk.
+
+        Parameters
+        ----------
+        data : array_like, any shape
+            Chunk of numbers (flattened). NaN is counted in `n_nan_`.
+
+        Returns
+        -------
+        StreamingHistogram
+            The same object (`self`).
+
+        Raises
+        ------
+        ValueError
+            If `data` is not numeric or contains infinity.
+
+        Notes
+        -----
+        `partial_fit` is an alias.
+        Time: O(n log B). Space: O(n) temporary.
+        """
+        values = _as_float_array(data).ravel()
+        self.n_seen_ += values.size
+        if self.window is not None:
+            joined = values if self._values is None else np.concatenate([self._values, values])
+            self._values = joined[-self.window:]
+            return self
+        counts, below, above, nan = self._count(values)
+        self._counts += counts
+        self._below += below
+        self._above += above
+        self._nan += nan
+        return self
+
+    partial_fit = update
+
+    def _current(self):
+        """Counts and outlier tallies for the current mode (see `_count`)."""
+        if self.window is None:
+            return self._counts.copy(), self._below, self._above, self._nan
+        if self._values is None:
+            return self._counts.copy(), 0, 0, 0
+        return self._count(self._values)
+
+    @property
+    def n_below_(self):
+        """Values below the first edge."""
+        return self._current()[1]
+
+    @property
+    def n_above_(self):
+        """Values above the last edge."""
+        return self._current()[2]
+
+    @property
+    def n_nan_(self):
+        """NaN values."""
+        return self._current()[3]
+
+    def result(self, density=False):
+        """
+        Current histogram.
+
+        Parameters
+        ----------
+        density : bool, default False
+            If True, scale the counts so the histogram integrates to 1.
+
+        Returns
+        -------
+        counts : np.ndarray, shape (B,)
+            int64 counts, or float densities (all zeros if nothing is inside).
+        edges : np.ndarray of float, shape (B + 1,)
+
+        Notes
+        -----
+        Time: O(B) (O(window log B) with a window). Space: O(B).
+        """
+        counts = self._current()[0]
+        if not density:
+            return counts, self.edges_.copy()
+        total = counts.sum()
+        widths = np.diff(self.edges_)
+        dens = np.zeros(counts.size)
+        if total > 0:
+            dens = counts / (total * widths)
+        return dens, self.edges_.copy()
+
+
+class StreamStats:
+    """
+    All streaming statistics of a dataset behind one ``update_stats`` call.
+
+    Combines RunningStats (count, mean, variance, min, max),
+    StreamingQuantile and, optionally, one StreamingHistogram per column.
+
+    Parameters
+    ----------
+    quantiles : sequence of float in [0, 1], default (0.25, 0.5, 0.75)
+        Quantiles reported by `result`.
+    capacity : int, default 4096
+        Reservoir size of the quantile estimate.
+    window : int, optional
+        Sliding window (in rows) for the quantiles and histograms. The
+        moments always cover the whole stream.
+    hist_bins : int, optional
+        If given, keep a histogram with this many bins per column;
+        `hist_range` is then required.
+    hist_range : (float, float), optional
+        Range of the histograms.
+    seed : int or None, default 0
+        Seed for the quantile reservoir.
+
+    Examples
+    --------
+    >>> s = StreamStats()
+    >>> _ = s.update_stats([[1.0, 10.0], [2.0, 20.0]])
+    >>> _ = s.update_stats([[3.0, 30.0]])
+    >>> s.result()["mean"].tolist()
+    [2.0, 20.0]
+    """
+
+    def __init__(self, quantiles=(0.25, 0.5, 0.75), capacity=4096, window=None,
+                 hist_bins=None, hist_range=None, seed=0):
+        """
+        Create an empty summary; see the class docstring.
+
+        Raises
+        ------
+        ValueError, TypeError
+            Invalid quantiles, capacity, window or histogram settings.
+
+        Notes
+        -----
+        Time: O(1). Space: O(1).
+        """
+        self.quantiles = _check_q(quantiles)[0]
+        self._moments = RunningStats()
+        self._quantile = StreamingQuantile(capacity=capacity, window=window, seed=seed)
+        self._hist_bins = _check_positive_int(hist_bins, "hist_bins", allow_none=True)
+        if self._hist_bins is not None:
+            # validates the range once, up front
+            StreamingHistogram(self._hist_bins, hist_range, window)
+        self._hist_range = hist_range
+        self._window = window
+        self._hists = None
+
+    def reset(self):
+        """
+        Forget everything seen so far.
+
+        Returns
+        -------
+        StreamStats
+            The same object (`self`).
+
+        Notes
+        -----
+        Time: O(1). Space: O(1).
+        """
+        self._moments.reset()
+        self._quantile.reset()
+        self._hists = None
+        return self
+
+    def update_stats(self, X_chunk):
+        """
+        Update every statistic with one chunk.
+
+        Parameters
+        ----------
+        X_chunk : array_like, shape (n,) or (n, d)
+            Chunk of numbers; NaN is ignored, infinity is rejected.
+
+        Returns
+        -------
+        StreamStats
+            The same object (`self`).
+
+        Raises
+        ------
+        ValueError
+            If the chunk is not numeric, contains infinity, is not 1-D or 2-D,
+            or has a different number of columns than the first chunk. No
+            statistic is updated in that case.
+
+        Notes
+        -----
+        `update` and `partial_fit` are aliases. The histogram loop runs over
+        columns (each has its own counts), never over rows.
+        Time: O(n d log B). Space: O(n d) temporary.
+        """
+        arr = _as_chunk(X_chunk, self._moments._shape, "StreamStats")
+        self._moments.partial_fit(arr)
+        self._quantile.update(arr)
+        if self._hist_bins is not None:
+            cols = arr.reshape(arr.shape[0], -1)
+            if self._hists is None:
+                self._hists = [
+                    StreamingHistogram(self._hist_bins, self._hist_range, self._window)
+                    for _ in range(cols.shape[1])
+                ]
+            for j, hist in enumerate(self._hists):
+                hist.update(cols[:, j])
+        return self
+
+    update = update_stats
+    partial_fit = update_stats
+
+    def result(self):
+        """
+        Current summary.
+
+        Returns
+        -------
+        dict
+            "count", "mean", "var", "std", "min", "max": float, or np.ndarray
+            of shape (d,) for 2-D chunks. "quantiles": dict mapping each q to
+            its value(s). "histogram": list of (counts, edges), one per
+            column, only when `hist_bins` was given.
+
+        Raises
+        ------
+        RuntimeError
+            If no chunk has been seen yet.
+
+        Notes
+        -----
+        Time: O(d + m log m) for m stored quantile rows. Space: O(d).
+        """
+        m = self._moments
+        out = {
+            "count": m.count(), "mean": m.mean(), "var": m.var(), "std": m.std(),
+            "min": m.min(), "max": m.max(),
+        }
+        qs = np.atleast_1d(self.quantiles)
+        values = self._quantile.result(qs)
+        out["quantiles"] = {float(q): values[i] for i, q in enumerate(qs)}
+        if self._hists is not None:
+            out["histogram"] = [h.result() for h in self._hists]
+        return out
+
+
+def update_stats(X_chunk, state=None, **options):
+    """
+    Functional form of the streaming API: fold one chunk into a summary.
+
+    Parameters
+    ----------
+    X_chunk : array_like, shape (n,) or (n, d)
+        Chunk of numbers.
+    state : StreamStats, optional
+        Summary returned by an earlier call. None starts a new one.
+    **options
+        Passed to StreamStats when a new summary is created (quantiles,
+        capacity, window, hist_bins, hist_range, seed).
+
+    Returns
+    -------
+    StreamStats
+        The updated summary; call ``.result()`` to read it.
+
+    Raises
+    ------
+    TypeError
+        If `state` is not a StreamStats, or options are given together with
+        an existing state.
+    ValueError
+        As for StreamStats.update_stats.
+
+    Notes
+    -----
+    Time and space as for StreamStats.update_stats.
+
+    Examples
+    --------
+    >>> state = None
+    >>> for chunk in ([1.0, 2.0], [3.0, 4.0]):
+    ...     state = update_stats(chunk, state)
+    >>> float(state.result()["mean"])
+    2.5
+    """
+    if state is None:
+        state = StreamStats(**options)
+    elif not isinstance(state, StreamStats):
+        raise TypeError(f"state must be a StreamStats or None, got {type(state).__name__}")
+    elif options:
+        raise TypeError("options can only be given when state is None")
+    return state.update_stats(X_chunk)
