@@ -3,11 +3,18 @@ pipeline.py
 Runs preprocessing steps one after another.
 Each step has fit and transform.
 FeatureUnion runs steps side by side and joins their outputs.
+
+Streaming: Pipeline.partial_fit(X_chunk, y_chunk) updates every step with one
+chunk, transforming the chunk incrementally on its way to the final model, so
+a chained pipeline (e.g. StandardScaler -> DecisionTreeClassifier) learns
+from a stream without ever seeing the whole dataset.
 """
 
 import inspect
 
 import numpy as np
+
+from .utils import NotFittedError
 
 __all__ = ["Transformer", "Estimator", "Pipeline", "FeatureUnion"]
 
@@ -173,7 +180,9 @@ class Pipeline(Transformer):
 
     def _check_fitted(self):
         if not self._is_fitted:
-            raise RuntimeError("Pipeline is not fitted yet; call fit first")
+            raise NotFittedError(
+                "Pipeline is not fitted yet; call fit or partial_fit first"
+            )
 
     def _fit_intermediate(self, X):
         # fit each step and feed its output into the next one
@@ -231,6 +240,9 @@ class Pipeline(Transformer):
         """Update every step with one more chunk of data.
 
         Each step learns from the chunk after it has gone through the steps before it, using what they have learned so far.
+        A chunk is therefore transformed with the statistics available at that moment (including itself), which is what
+        a stream allows: later chunks cannot be used to scale earlier ones. A buffering model at the end (the decision
+        tree) stores the chunk as it was transformed on arrival.
 
         Parameters
         ----------
@@ -258,6 +270,7 @@ class Pipeline(Transformer):
                     f"step {name!r} ({type(step).__name__}) has no partial_fit method"
                 )
         for _, step in self.steps[:-1]:
+            # learn from the chunk first, then pass it on in transformed form
             step.partial_fit(X)
             X = step.transform(X)
         _call_fit(self.steps[-1][1].partial_fit, X, y)
@@ -350,8 +363,9 @@ class Pipeline(Transformer):
 
         Raises
         ------
-        RuntimeError
-            Called before fit.
+        NotFittedError (a RuntimeError)
+            Called before fit/partial_fit, or the final model has not been trained yet
+            (a buffered tree whose first buffer is still filling).
         TypeError
             The last step has no predict method.
 
@@ -432,6 +446,40 @@ class FeatureUnion(Transformer):
         self._is_fitted = True
         return self
 
+    def partial_fit(self, X, y=None):
+        """Update each transformer with one more chunk of data. y is ignored.
+
+        Parameters
+        ----------
+        X: array-like of shape (n_samples, n_features)
+            One chunk of data.
+        y: ignored
+
+        Returns
+        -------
+        self
+
+        Raises
+        ------
+        TypeError
+            A transformer has no partial_fit method. Nothing is updated in that case.
+
+        Notes
+        -----
+        Cost is the sum of each transformer's partial_fit. update is an alias.
+        """
+        for name, step in self.transformer_list:
+            if not hasattr(step, "partial_fit"):
+                raise TypeError(
+                    f"step {name!r} ({type(step).__name__}) has no partial_fit method"
+                )
+        for _, step in self.transformer_list:
+            step.partial_fit(X)
+        self._is_fitted = True
+        return self
+
+    update = partial_fit
+
     def transform(self, X):
         """Transform X with each transformer and stack the outputs side by side.
 
@@ -455,7 +503,9 @@ class FeatureUnion(Transformer):
         Cost is the sum of each transformer's transform, plus O(n_samples * total columns) for the hstack.
         """
         if not self._is_fitted:
-            raise RuntimeError("FeatureUnion is not fitted yet; call fit first")
+            raise NotFittedError(
+                "FeatureUnion is not fitted yet; call fit or partial_fit first"
+            )
         return self._combine(
             [(name, step.transform(X)) for name, step in self.transformer_list]
         )
