@@ -8,6 +8,7 @@ Exponentials are always taken after subtracting the maximum, so large inputs don
 import numpy as np
 
 __all__ = [
+    "NotFittedError",
     "MISSING_TOKENS",
     "INTERPOLATIONS",
     "check_axis",
@@ -28,6 +29,20 @@ __all__ = [
 # shared by stats.py, rank.py and preprocessing.py so they all agree
 MISSING_TOKENS = ("", "nan", "none", "null", "na")
 INTERPOLATIONS = ("linear", "lower", "higher", "midpoint")
+
+# a squared distance below this fraction of |x|^2 + |y|^2 has lost at least
+# half of its significant digits in the expanded formula, so it is recomputed
+_CANCELLATION_RTOL = float(np.sqrt(np.finfo(np.float64).eps))
+
+
+class NotFittedError(RuntimeError):
+    """Raised when predict/transform is called before any training happened.
+
+    It subclasses RuntimeError, so code that catches RuntimeError (as the
+    Assignment 2.1 modules raised) keeps working. In a stream it is the
+    signal "no model yet": a buffered tree raises it until its first retrain.
+    """
+
 
 _METRICS = ("euclidean", "sqeuclidean", "manhattan", "cosine")
 _NAN_POLICIES = ("propagate", "omit")
@@ -150,6 +165,34 @@ def _check_int(value, name, minimum):
     return int(value)
 
 
+def _refine_close_pairs(D, scale, Xa, Ya):
+    """Recompute, in place, the squared distances that suffered cancellation.
+
+    Parameters
+    ----------
+    D : np.ndarray, shape (n, m)
+        Squared distances from the expanded formula; modified in place.
+    scale : np.ndarray, shape (n, m)
+        |x|^2 + |y|^2 for every pair (after centring).
+    Xa, Ya : np.ndarray, shape (n, d) and (m, d)
+        The original (uncentred) points.
+
+    Notes
+    -----
+    A pair is recomputed when D <= sqrt(eps) * scale. The direct form
+    sum((x - y)^2) subtracts the coordinates first, so it is exact to
+    rounding however far the points are from the origin. The loop runs over
+    chunks of pairs only, to bound the (pairs, d) temporary.
+    Time: O(p d) for p recomputed pairs. Space: O(min(p, chunk) d).
+    """
+    rows, cols = np.nonzero(D <= _CANCELLATION_RTOL * scale)
+    step = max(1, _CHUNK_ELEMENTS // max(Xa.shape[1], 1))
+    for start in range(0, rows.size, step):  # loop over chunks only
+        r, c = rows[start:start + step], cols[start:start + step]
+        diff = Xa[r] - Ya[c]
+        D[r, c] = np.einsum("ij,ij->i", diff, diff)
+
+
 def pairwise_distances(X, Y=None, metric="euclidean", batch_size=None):
     """Distance between every row of X and every row of Y.
 
@@ -179,12 +222,15 @@ def pairwise_distances(X, Y=None, metric="euclidean", batch_size=None):
 
     Notes
     -----
-    'euclidean' and 'sqeuclidean' use `|x|^2 + |y|^2 - 2 x.y` (one matrix product) after centring both sets on the mean of Y, which removes most of
-    the cancellation error, then clip tiny negatives to 0. 'cosine' also uses one matrix product.
+    'euclidean' and 'sqeuclidean' use `|x|^2 + |y|^2 - 2 x.y` (one matrix product) after centring both sets on the mean of Y.
+    That formula subtracts two large numbers when a pair of points is close together but far from the centre
+    (e.g. X = [[1e9]], Y = [[1e9 + 1], [-1e9]]: the centre is near 0 and the first distance would come out as 0 instead of 1).
+    Every pair whose squared distance is below sqrt(eps) * (|x|^2 + |y|^2) is therefore recomputed directly as sum((x - y)^2),
+    which has no cancellation. Only those pairs are recomputed (in bounded-memory chunks), so well-separated data keeps the
+    one-matrix-product cost. 'cosine' also uses one matrix product.
     'manhattan' broadcasts in chunks, the only Python loop is over chunks, which exists to bound memory.
 
-    Because of rounding, two identical points in X and Y can get a 'euclidean' distance of about 1e-8 instead of exactly 0.
-    Compare distances with a tolerance (e.g. np.isclose with atol=1e-7) rather than ==. The diagonal for Y=None is always exactly 0.
+    Identical points get a distance of exactly 0, and the diagonal for Y=None is always exactly 0.
 
     Time: O(n m d). Space: O(n m) for the result (plus O(b m d) per chunk for 'manhattan').
     """
@@ -218,9 +264,11 @@ def pairwise_distances(X, Y=None, metric="euclidean", batch_size=None):
         Xc, Yc = Xa - centre, Ya - centre
         xx = np.einsum("ij,ij->i", Xc, Xc)
         yy = xx if self_pair else np.einsum("ij,ij->i", Yc, Yc)
-        D = xx[:, None] + yy[None, :] - 2.0 * (Xc @ Yc.T)
+        scale = xx[:, None] + yy[None, :]
+        D = scale - 2.0 * (Xc @ Yc.T)
         # rounding can leave tiny negatives; clip them so sqrt doesn't give NaN
         np.maximum(D, 0.0, out=D)
+        _refine_close_pairs(D, scale, Xa, Ya)
         if self_pair:
             np.fill_diagonal(D, 0.0)
         return np.sqrt(D, out=D) if metric == "euclidean" else D
