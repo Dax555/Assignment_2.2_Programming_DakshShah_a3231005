@@ -14,7 +14,10 @@ Every transformer works in two modes:
 API (all classes)
 -----------------
 - fit(X) -> self             forget everything, then learn from X
-- partial_fit(X) -> self     learn from one more chunk (alias: update)
+- partial_fit(X, y=None) -> self
+                             learn from one more chunk (alias: update); y is
+                             accepted and ignored so every step of a streaming
+                             Pipeline can be called the same way
 - transform(X) -> X_out      apply what has been learned so far
 - fit_transform(X) -> X_out  fit, then transform
 - reset() -> self            forget everything
@@ -154,6 +157,76 @@ def _as_str_column(col):
     Space: O(n).
     """
     return np.char.strip(np.asarray(col).astype(str))
+
+
+def _number_key(value):
+    """
+    Canonical text key of one Python value (used for object arrays only).
+
+    Parameters
+    ----------
+    value : object
+        A single cell.
+
+    Returns
+    -------
+    str
+        "1" for 1, 1.0 and numpy equivalents; the stripped text otherwise.
+
+    Notes
+    -----
+    Time: O(1). Space: O(1).
+    """
+    if isinstance(value, (bool, np.bool_)):
+        return str(value)
+    if isinstance(value, (float, np.floating)) and np.isfinite(value) and value == int(value):
+        return str(int(value))
+    return str(value).strip()
+
+
+_number_keys = np.frompyfunc(_number_key, 1, 1)
+
+
+def _as_key_column(col):
+    """
+    Convert a column to the text keys used to compare categories.
+
+    A category is identified by its value, not by how its dtype prints:
+    the integer 1 and the float 1.0 are the same category "1" (plain
+    ``astype(str)`` would give "1" and "1.0", so an encoder fitted on integers
+    would not recognise the same numbers arriving as floats in a later chunk).
+
+    Parameters
+    ----------
+    col : array_like, shape (n,)
+        One column: integers, floats, booleans, text or mixed objects.
+
+    Returns
+    -------
+    np.ndarray of str, shape (n,)
+        Float values that are whole numbers are written without a decimal
+        part ("2", not "2.0"); other floats keep their shortest repr ("2.5");
+        NaN becomes "nan" (a missing-value token); text is stripped.
+
+    Notes
+    -----
+    Text is compared as text: the strings "1" and "1.0" stay different,
+    because a text column may use such codes as distinct labels. Float and
+    integer columns are converted with array operations; only an object
+    column (mixed Python values) is converted cell by cell.
+    Time: O(n). Space: O(n).
+    """
+    col = np.asarray(col)
+    if col.dtype.kind == "f":
+        text = col.astype(str)
+        whole = np.isfinite(col) & (col == np.floor(col)) & (np.abs(col) < 2.0 ** 53)
+        if whole.any():
+            as_int = np.where(whole, col, 0.0).astype(np.int64).astype(str)
+            text = np.where(whole, as_int, text)
+        return text.astype(str)
+    if col.dtype.kind == "O":
+        return _number_keys(col).astype(str)
+    return np.char.strip(col.astype(str))
 
 
 def _is_missing(str_col):
@@ -305,7 +378,7 @@ class StandardScaler(Transformer):
         std[std == 0.0] = 1.0
         return std
 
-    def partial_fit(self, X):
+    def partial_fit(self, X, y=None):
         """
         Merge one chunk into the running statistics.
 
@@ -547,7 +620,7 @@ class MinMaxScaler(Transformer):
         self.n_ = self.min_ = self.max_ = None
         return self
 
-    def partial_fit(self, X):
+    def partial_fit(self, X, y=None):
         """
         Update the running minimum and maximum with one chunk.
 
@@ -821,7 +894,7 @@ class Imputer(Transformer):
             for v, c in zip(self._values, self._counts)
         ]
 
-    def partial_fit(self, X):
+    def partial_fit(self, X, y=None):
         """
         Update the running mean or the value counts with one chunk.
 
@@ -1047,6 +1120,13 @@ class OneHotEncoder(Transformer):
     -----
     A missing value ("", "nan", "none", "null", "na") is never a category and
     is always encoded as all zeros.
+
+    Categories are matched by value, not by dtype: numbers are compared in a
+    canonical text form in which whole-number floats drop their decimal part,
+    so an encoder fitted on the integers 1 and 2 encodes the floats 1.0 and
+    2.0 identically (a stream may deliver the same column as int in one
+    chunk and float in the next). Text is compared as text, so the strings
+    "1" and "1.0" remain different categories.
     """
     def __init__(self, categories=None, handle_unknown="ignore"):
         """
@@ -1096,8 +1176,7 @@ class OneHotEncoder(Transformer):
             self.categories_ = None
             self._frozen = False
         else:
-            self.categories_ = [np.array([str(c) for c in cats], dtype=str)
-                                for cats in self._init_categories]
+            self.categories_ = [_as_key_column(np.asarray(cats)) for cats in self._init_categories]
             self.n_features_ = len(self.categories_)
             self._frozen = True
         return self
@@ -1148,7 +1227,7 @@ class OneHotEncoder(Transformer):
         self._check_fitted()
         return int(sum(len(c) for c in self.categories_))
 
-    def partial_fit(self, X):
+    def partial_fit(self, X, y=None):
         """
         Learn any new categories in this chunk.
 
@@ -1188,7 +1267,7 @@ class OneHotEncoder(Transformer):
         # One pass per column: each column keeps its own list of categories, and
         # new ones go at the end so existing output columns never move.
         for j in range(self.n_features_):
-            col = _as_str_column(X[:, j])
+            col = _as_key_column(X[:, j])
             col = col[~_is_missing(col)]
             new = np.setdiff1d(np.unique(col), self.categories_[j])
             if new.size:
@@ -1259,7 +1338,7 @@ class OneHotEncoder(Transformer):
         self._check_fitted()
         X = _as_any_2d(X)
         _check_n_features(self.n_features_, X)
-        Xs = np.char.strip(X.astype(str))
+        Xs = _as_key_column(X.ravel()).reshape(X.shape) if X.size else X.astype(str)
         sizes = [len(cats) for cats in self.categories_]
         # owner[k] is the input column that output column k belongs to.
         owner = np.repeat(np.arange(self.n_features_), sizes)
@@ -1472,7 +1551,7 @@ class ColumnTransformer(Transformer):
         self.n_features_ = None
         return self
 
-    def partial_fit(self, X):
+    def partial_fit(self, X, y=None):
         """
         Route one chunk's columns to their steps and learn from it.
 
