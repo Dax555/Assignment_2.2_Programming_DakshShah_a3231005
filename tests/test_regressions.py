@@ -143,7 +143,8 @@ def test_demo_assets_exist_for_a_local_run():
     if not os.path.isfile(notebook):
         pytest.skip("notebook not present in this checkout")
     text = open(notebook).read()
-    assert "getpass" not in text and "TOKEN" not in text
+    # a private-repo clone may ask for a token, but never store one in the notebook
+    assert "ghp_" not in text and "github_pat_" not in text
     assert "IRIS_CSV" in text, "the built-in fallback data must stay in the notebook"
 
 
