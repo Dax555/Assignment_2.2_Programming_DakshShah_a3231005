@@ -136,13 +136,15 @@ def test_packaging_installs_from_the_repository_root():
 
 
 def test_demo_assets_exist_for_a_local_run():
-    # the demo must run from a local checkout, without GitHub credentials
+    # the demo must run from a local checkout or a public clone (Colab),
+    # without GitHub credentials, and must work without a CSV upload
     assert os.path.isfile(os.path.join(ROOT, "demo", "data", "iris.csv"))
-    notebook = os.path.join(ROOT, "demo", "stream_demo.ipynb")
+    notebook = os.path.join(ROOT, "demo", "quickstart.ipynb")
     if not os.path.isfile(notebook):
         pytest.skip("notebook not present in this checkout")
     text = open(notebook).read()
-    assert "git clone" not in text and "getpass" not in text and "TOKEN" not in text
+    assert "getpass" not in text and "TOKEN" not in text
+    assert "IRIS_CSV" in text, "the built-in fallback data must stay in the notebook"
 
 
 # ------------------------------------------------------- benchmark results
