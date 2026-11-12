@@ -147,7 +147,7 @@ for X_chunk, y_chunk in stream:
 │   └── benchmarking.py    timing harness with a correctness gate
 ├── tests/                 unit tests (pytest)
 ├── demo/
-│   ├── stream_demo.ipynb  the demo notebook (outputs included)
+│   ├── quickstart.ipynb   the demo notebook (runs on Google Colab or locally)
 │   ├── iris_demo.py       the same flow as a terminal script with self-checks
 │   └── data/iris.csv
 ├── benchmark/
@@ -253,14 +253,20 @@ python demo/iris_demo.py --show                         # also open the plot win
 python demo/iris_demo.py --chunk-size 15 --buffer-size 45 --seed 3
 ```
 
-**Notebook:**
+**Notebook on Google Colab:** open
+[demo/quickstart.ipynb in Colab](https://colab.research.google.com/github/Dax555/Assignment_2.2_Programming_DakshShah_a3231005/blob/Individual/demo/quickstart.ipynb)
+(or *File > Open notebook > GitHub* and paste the repository URL), then *Runtime > Run all*. The first cell clones this repository (branch `Individual`) into the Colab machine and imports the package from it. The repository is private, so it asks for your GitHub username and a personal access token (GitHub > Settings > Developer settings > Personal access tokens, with read access to this repository); the token is typed into a hidden prompt and is not saved.
+
+**Notebook locally:**
 
 ```bash
 python -m pip install jupyter      # if needed
-jupyter notebook demo/stream_demo.ipynb
+jupyter notebook demo/quickstart.ipynb
 ```
 
-then `Kernel > Restart & Run All`. The notebook imports the package from your local checkout: it needs no internet access, no `git clone` and no GitHub token. It loads `demo/data/iris.csv` with `io.py`, splits it into chunks, trains the pipeline with `.partial_fit()`, logs the metrics and plots them with `visualise.py`. Its saved outputs include the benchmark tables.
+then `Kernel > Restart & Run All`. When opened from a local checkout the notebook skips the clone and imports the package directly.
+
+**Data:** set `UPLOAD_CSV = True` (Colab file picker) or `CSV_PATH = "..."` in section 1 to use your own CSV (header row, numeric features, class label in the last column). If no CSV is given or the file is not found, the notebook uses the Iris dataset hard-coded inside it, so it always runs. It then splits the data into chunks, trains the pipeline with `.partial_fit()`, logs the metrics and plots them with `visualise.py`, and repeats small versions of the benchmarks.
 
 ## Running the tests
 
