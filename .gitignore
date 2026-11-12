@@ -11,3 +11,6 @@ venv/
 v/
 # files written by the demo (regenerated on every run)
 demo/outputs/
+
+# written by demo/quickstart.ipynb when it falls back to the built-in Iris data
+iris_builtin.csv
