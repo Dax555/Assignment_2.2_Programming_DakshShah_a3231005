@@ -405,13 +405,13 @@ def save_plots(rows, curves, out):
     sizes = [r["buffer_size"] for r in rows]
     fig, ax = visualise.plot_metric_over_time(
         [r["accuracy"] for r in rows], "Accuracy vs buffer size",
-        "Prequential accuracy", xlabel="buffer_size (log scale)", x=sizes, show=False)
-    ax.set_xscale("log")
+        "Prequential accuracy", xlabel="buffer_size (log scale)", x=sizes, xscale="log",
+        show=False)
     fig.savefig(os.path.join(out, "buffer_size_accuracy.png"), dpi=150)
     fig, ax = visualise.plot_metric_over_time(
         [r["mean_retrain_ms"] for r in rows], "Retraining time vs buffer size",
-        "Mean time per retrain (ms)", xlabel="buffer_size (log scale)", x=sizes, show=False)
-    ax.set_xscale("log")
+        "Mean time per retrain (ms)", xlabel="buffer_size (log scale)", x=sizes, xscale="log",
+        show=False)
     fig.savefig(os.path.join(out, "buffer_size_retrain_time.png"), dpi=150)
     small, large = sizes[0], sizes[-1]
     visualise.compare_models(

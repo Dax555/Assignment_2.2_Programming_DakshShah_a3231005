@@ -165,7 +165,8 @@ def _draw_series(ax, x, values, index, label, nudge=0):
     -----
     Markers are only drawn for short series, where single chunks matter.
     The horizontal axis always starts at the first chunk, so warm-up chunks
-    without a value show as an empty stretch instead of being cut off.
+    without a value show as an empty stretch instead of being cut off. On a
+    log axis the margin is a factor, so the limit never reaches zero.
     """
     marker = _MARKERS[index] if values.size <= 40 else None
     ax.plot(x, values, color=_SERIES[index], linestyle=_LINE_STYLES[index],
@@ -176,12 +177,17 @@ def _draw_series(ax, x, values, index, label, nudge=0):
         ax.annotate(f"{values[last]:.3f}", (x[last], values[last]),
                     textcoords="offset points", xytext=(6, nudge), va="center",
                     fontsize=9, color=_INK)
-    ax.set_xlim(left=min(ax.get_xlim()[0], x[0] - 0.02 * (x[-1] - x[0] + 1)))
+    if ax.get_xscale() == "log":
+        left = x[0] / (x[-1] / x[0]) ** 0.03 if x[-1] > x[0] else x[0] / 2
+    else:
+        left = x[0] - 0.02 * (x[-1] - x[0] + 1)
+    ax.set_xlim(left=min(ax.get_xlim()[0], left))
 
 
 # -------------------------------------------------------------------- plots
 def plot_metric_over_time(metric_values, title="Metric over time", ylabel="Value",
-                          xlabel="Chunk", x=None, save_path=None, show=True, ax=None):
+                          xlabel="Chunk", x=None, xscale="linear", save_path=None,
+                          show=True, ax=None):
     """Plot one metric across the chunks of a stream.
 
     Parameters
@@ -196,6 +202,9 @@ def plot_metric_over_time(metric_values, title="Metric over time", ylabel="Value
         Label of the horizontal axis.
     x : array_like, shape (n_chunks,), optional
         Horizontal positions, e.g. samples seen. Default: 1, 2, ..., n_chunks.
+    xscale : {"linear", "log"}, default "linear"
+        Scale of the horizontal axis. Use "log" when `x` spans several orders
+        of magnitude, e.g. buffer sizes from 100 to 10,000.
     save_path : str or path-like, optional
         Save the figure to this file.
     show : bool, default True
@@ -210,8 +219,9 @@ def plot_metric_over_time(metric_values, title="Metric over time", ylabel="Value
     Raises
     ------
     ValueError
-        If `metric_values` is not numeric, not 1-D or empty, or `x` has a
-        different length.
+        If `metric_values` is not numeric, not 1-D or empty, `x` has a
+        different length, `xscale` is unknown, or `xscale="log"` is used with
+        an `x` that is not positive and increasing.
 
     Notes
     -----
@@ -228,7 +238,16 @@ def plot_metric_over_time(metric_values, title="Metric over time", ylabel="Value
         raise ValueError(
             f"x and metric_values must have the same length, got {x.size} and {values.size}"
         )
+    if xscale not in ("linear", "log"):
+        raise ValueError(f"xscale must be 'linear' or 'log', got {xscale!r}")
+    if xscale == "log" and not (np.all(x > 0) and np.all(np.diff(x) > 0)):
+        raise ValueError("xscale='log' needs x values that are positive and increasing")
     fig, ax = _new_axes(ax, (7.5, 4.0))
+    ax.set_xscale(xscale)          # before drawing, so the axis margin suits the scale
+    if xscale == "log":
+        ax.set_xticks(x)
+        ax.set_xticklabels([f"{v:,.0f}" for v in x])
+        ax.minorticks_off()
     _draw_series(ax, x, values, 0, None)
     _label(ax, title, xlabel, ylabel)
     _finish(fig, save_path, show)

@@ -80,3 +80,19 @@ def test_plots_can_share_one_figure():
     visualise.compare_models([1.0], [2.0], ax=axes[1], show=False)
     assert out_fig is fig and out_ax is axes[0]
     assert len(axes[1].get_lines()) == 2
+
+
+def test_log_scale_keeps_every_point_visible():
+    # the buffer-size plots span 100 to 10,000: on a log axis the left margin
+    # must stay positive, or matplotlib squeezes all points into one spot
+    sizes = [100, 250, 500, 1000, 2000, 5000, 10000]
+    fig, ax = visualise.plot_metric_over_time([0.9, 0.91, 0.92, 0.92, 0.91, 0.86, 0.72],
+                                              x=sizes, xscale="log", show=False)
+    left, right = ax.get_xlim()
+    assert ax.get_xscale() == "log"
+    assert 0 < left < 100 and right > 10000
+    assert [t.get_text() for t in ax.get_xticklabels()] == [f"{s:,}" for s in sizes]
+    with pytest.raises(ValueError, match="positive"):
+        visualise.plot_metric_over_time([1.0, 2.0], x=[0, 10], xscale="log", show=False)
+    with pytest.raises(ValueError, match="xscale"):
+        visualise.plot_metric_over_time([1.0, 2.0], xscale="sqrt", show=False)

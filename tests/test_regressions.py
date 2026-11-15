@@ -136,16 +136,20 @@ def test_packaging_installs_from_the_repository_root():
 
 
 def test_demo_assets_exist_for_a_local_run():
-    # the demo must run from a local checkout or a public clone (Colab),
-    # without GitHub credentials, and must work without a CSV upload
-    assert os.path.isfile(os.path.join(ROOT, "demo", "data", "iris.csv"))
-    notebook = os.path.join(ROOT, "demo", "quickstart.ipynb")
+    # the demo must run from a local checkout without GitHub credentials,
+    # and must still work when no CSV file is available
+    notebook = os.path.join(ROOT, "demo", "stream_demo.ipynb")
     if not os.path.isfile(notebook):
         pytest.skip("notebook not present in this checkout")
     text = open(notebook).read()
     # a private-repo clone may ask for a token, but never store one in the notebook
     assert "ghp_" not in text and "github_pat_" not in text
     assert "IRIS_CSV" in text, "the built-in fallback data must stay in the notebook"
+    # the notebook is committed with the outputs of a clean run
+    import json
+    cells = [c for c in json.loads(text)["cells"] if c["cell_type"] == "code"]
+    assert cells and all(c["outputs"] for c in cells), "run the notebook and save its outputs"
+    assert not any(o["output_type"] == "error" for c in cells for o in c["outputs"])
 
 
 # ------------------------------------------------------- benchmark results
