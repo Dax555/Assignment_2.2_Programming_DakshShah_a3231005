@@ -147,7 +147,7 @@ for X_chunk, y_chunk in stream:
 │   └── benchmarking.py    timing harness with a correctness gate
 ├── tests/                 unit tests (pytest)
 ├── demo/
-│   ├── quickstart.ipynb   the demo notebook (runs on Google Colab or locally)
+│   ├── stream_demo.ipynb  the demo notebook (outputs included; runs locally or on Colab)
 │   ├── iris_demo.py       the same flow as a terminal script with self-checks
 │   └── data/iris.csv
 ├── benchmark/
@@ -221,7 +221,7 @@ All accumulate over the whole stream by default; `window=N` makes any of them a 
 
 | Function | Plot |
 |---|---|
-| `plot_metric_over_time(metric_values, title, ylabel, xlabel="Chunk", x=None, ...)` | One metric across chunks. |
+| `plot_metric_over_time(metric_values, title, ylabel, xlabel="Chunk", x=None, xscale="linear", ...)` | One metric across chunks (or against any `x`, e.g. buffer sizes on a log axis). |
 | `compare_models(metric1, metric2, labels, title=..., ylabel=..., ...)` | Two models on the same metric. |
 | `plot_predictions_vs_ground_truth(y_true, y_pred, title=None, ...)` | Predictions against the true labels of a chunk. |
 
@@ -253,20 +253,20 @@ python demo/iris_demo.py --show                         # also open the plot win
 python demo/iris_demo.py --chunk-size 15 --buffer-size 45 --seed 3
 ```
 
-**Notebook on Google Colab:** open
-[demo/quickstart.ipynb in Colab](https://colab.research.google.com/github/Dax555/Assignment_2.2_Programming_DakshShah_a3231005/blob/Individual/demo/quickstart.ipynb)
-(or *File > Open notebook > GitHub* and paste the repository URL), then *Runtime > Run all*. The first cell clones this repository (branch `Individual`) into the Colab machine and imports the package from it. The repository is private, so it asks for your GitHub username and a personal access token (GitHub > Settings > Developer settings > Personal access tokens, with read access to this repository); the token is typed into a hidden prompt and is not saved.
-
-**Notebook locally:**
+**Notebook locally (no sign-in needed):**
 
 ```bash
 python -m pip install jupyter      # if needed
-jupyter notebook demo/quickstart.ipynb
+jupyter notebook demo/stream_demo.ipynb
 ```
 
-then `Kernel > Restart & Run All`. When opened from a local checkout the notebook skips the clone and imports the package directly.
+then `Kernel > Restart & Run All`. Opened from a local checkout, the notebook imports the package directly: it needs no internet access, no `git clone` and no GitHub token. Its saved outputs come from a full run and include the small benchmark tables, so the results can be read without running anything.
 
-**Data:** set `UPLOAD_CSV = True` (Colab file picker) or `CSV_PATH = "..."` in section 1 to use your own CSV (header row, numeric features, class label in the last column). If no CSV is given or the file is not found, the notebook uses the Iris dataset hard-coded inside it, so it always runs. It then splits the data into chunks, trains the pipeline with `.partial_fit()`, logs the metrics and plots them with `visualise.py`, and repeats small versions of the benchmarks.
+**Notebook on Google Colab (optional):** open
+[demo/stream_demo.ipynb in Colab](https://colab.research.google.com/github/Dax555/Assignment_2.2_Programming_DakshShah_a3231005/blob/Individual/demo/stream_demo.ipynb)
+(or *File > Open notebook > GitHub*), then *Runtime > Run all*. The first cell clones this repository (branch `Individual`) into the Colab machine. While the repository is private, GitHub asks for a username and a personal access token with read access to it; the token is typed into a hidden prompt and is not saved.
+
+**Data:** by default the notebook loads `demo/data/iris.csv` with `io.py`. Set `UPLOAD_CSV = True` (Colab file picker) or `CSV_PATH = "..."` in section 1 to use your own CSV (header row, numeric features, class label in the last column). If no CSV file can be found, a copy of the Iris data hard-coded in the notebook is used, so it always runs. It then splits the data into chunks, trains the pipeline with `.partial_fit()`, logs the metrics and plots them with `visualise.py`, and repeats small versions of the benchmarks.
 
 ## Running the tests
 
@@ -276,7 +276,7 @@ python -m pytest tests/test_tree.py -v
 python -m pytest --doctest-modules numcompute_stream    # the docstring examples
 ```
 
-395 tests. The streaming tests cover: chunked results equal to batch results for every chunk size (including chunks of one sample), empty chunks, NaN, zero-variance chunks, ties, new classes arriving mid-stream, a changed feature count, rolling windows, the buffer filling, clearing and retraining, prediction between retrains, and invalid inputs. `tests/test_regressions.py` holds the cases from the Assignment 2.1 feedback (see below) and a clean-import smoke check.
+396 tests. The streaming tests cover: chunked results equal to batch results for every chunk size (including chunks of one sample), empty chunks, NaN, zero-variance chunks, ties, new classes arriving mid-stream, a changed feature count, rolling windows, the buffer filling, clearing and retraining, prediction between retrains, and invalid inputs. `tests/test_regressions.py` holds the cases from the Assignment 2.1 feedback (see below) and a clean-import smoke check.
 
 ## Running the benchmarks
 
@@ -291,32 +291,33 @@ Options: `--quick`, `--repeat N`, `--seed S`, `--out DIR`, and `--part a|b|both`
 
 ## Benchmark results
 
-Environment for the numbers below: Python 3.13.18, NumPy 2.5.3, Linux x86_64, 2 CPU cores, seed 0. Timings vary between machines; the accuracies are reproducible with the seed.
+Environment for the numbers below: Python 3.12.3, NumPy 2.5.4, Linux x86_64, 12 CPU cores, seed 0. Timings vary between machines; the accuracies are reproducible with the seed.
 
 ### (a) Loop vs vectorised under streaming
 
 | case | n | baseline | loop (ms) | vectorised (ms) | speed-up | results match |
 |---|---:|---|---:|---:|---:|:---:|
-| tree: best split of one node (d=8) | 200 | loop over features x thresholds x rows | 10.055 | 0.396 | 25.4x | yes |
-| tree: best split of one node (d=8) | 1,000 | loop over features x thresholds x rows | 55.039 | 1.325 | 41.5x | yes |
-| tree: best split of one node (d=8) | 4,000 | loop over features x thresholds x rows | 266.248 | 4.592 | 58.0x | yes |
-| tree: predict (depth 6) | 2,000 | one root-to-leaf walk per row | 0.394 | 0.188 | 2.1x | yes |
-| tree: predict (depth 6) | 20,000 | one root-to-leaf walk per row | 3.780 | 1.123 | 3.4x | yes |
-| tree: predict (depth 6) | 200,000 | one root-to-leaf walk per row | 57.380 | 22.145 | 2.6x | yes |
-| tree: buffered stream (buffer 500, depth 4) | 1,000 | loop tree, per-row predict | 113.258 | 6.178 | 18.3x | yes |
-| tree: buffered stream (buffer 500, depth 4) | 4,000 | loop tree, per-row predict | 438.776 | 22.032 | 19.9x | yes |
-| metrics: confusion matrix, chunks of 100 | 1,000,000 | one increment per sample | 39.042 | 190.566 | 0.2x | yes |
-| stats: running mean/variance, chunks of 100 | 1,000,000 | Welford, one value at a time | 48.047 | 303.379 | 0.2x | yes |
-| stats: histogram (20 bins), chunks of 100 | 1,000,000 | one bin lookup per value | 88.795 | 136.912 | 0.6x | yes |
-| metrics: confusion matrix, chunks of 10,000 | 1,000,000 | one increment per sample | 38.377 | 16.305 | 2.4x | yes |
-| stats: running mean/variance, chunks of 10,000 | 1,000,000 | Welford, one value at a time | 50.000 | 8.518 | 5.9x | yes |
-| stats: histogram (20 bins), chunks of 10,000 | 1,000,000 | one bin lookup per value | 79.905 | 33.913 | 2.4x | yes |
+| tree: best split of one node (d=8) | 200 | loop over features x thresholds x rows | 18.101 | 0.706 | 25.6x | yes |
+| tree: best split of one node (d=8) | 1,000 | loop over features x thresholds x rows | 109.930 | 2.905 | 37.8x | yes |
+| tree: best split of one node (d=8) | 4,000 | loop over features x thresholds x rows | 680.552 | 21.558 | 31.6x | yes |
+| tree: predict (depth 6) | 2,000 | one root-to-leaf walk per row | 0.730 | 0.753 | 1.0x | yes |
+| tree: predict (depth 6) | 20,000 | one root-to-leaf walk per row | 6.754 | 2.967 | 2.3x | yes |
+| tree: predict (depth 6) | 200,000 | one root-to-leaf walk per row | 141.909 | 67.750 | 2.1x | yes |
+| tree: buffered stream (buffer 500, depth 4) | 1,000 | loop tree, per-row predict | 288.336 | 19.860 | 14.5x | yes |
+| tree: buffered stream (buffer 500, depth 4) | 4,000 | loop tree, per-row predict | 832.910 | 56.943 | 14.6x | yes |
+| metrics: confusion matrix, chunks of 100 | 1,000,000 | one increment per sample | 97.001 | 727.256 | 0.1x | yes |
+| stats: running mean/variance, chunks of 100 | 1,000,000 | Welford, one value at a time | 138.619 | 898.136 | 0.2x | yes |
+| stats: histogram (20 bins), chunks of 100 | 1,000,000 | one bin lookup per value | 490.930 | 358.476 | 1.4x | yes |
+| metrics: confusion matrix, chunks of 10,000 | 1,000,000 | one increment per sample | 87.276 | 34.157 | 2.6x | yes |
+| stats: running mean/variance, chunks of 10,000 | 1,000,000 | Welford, one value at a time | 139.470 | 23.794 | 5.9x | yes |
+| stats: histogram (20 bins), chunks of 10,000 | 1,000,000 | one bin lookup per value | 397.458 | 50.056 | 7.9x | yes |
 
 Reading the table:
 
-- The tree's split search is where vectorisation matters most: one sort and one cumulative sum replace the loop over features, thresholds and rows, and the gap widens with the node size.
-- Prediction gains less, because the loop baseline already does very little work per row.
-- For the per-chunk updates the chunk size decides. A NumPy call has a fixed overhead and the streaming classes also validate every chunk, so with chunks of 100 values a plain loop is faster; with chunks of 10,000 the vectorised update wins. Small chunks are a real cost of streaming, not a flaw in the measurement.
+- The tree's split search is where vectorisation matters most: one sort and one cumulative sum replace the loop over features, thresholds and rows, which makes it 26 to 38 times faster.
+- A whole buffered stream (buffering, retraining and predicting) is about 15 times faster.
+- Prediction gains less (about 2x, and none at 2,000 rows), because the loop baseline already does very little work per row.
+- For the per-chunk updates the chunk size decides. A NumPy call has a fixed overhead and the streaming classes also validate every chunk, so with chunks of 100 values a plain loop is 6 to 7 times faster for the confusion matrix and the running mean/variance; with chunks of 10,000 the vectorised update is 2.6 to 7.9 times faster. Small chunks are a real cost of streaming, not a flaw in the measurement.
 
 ### (b) Buffer size
 
@@ -326,13 +327,13 @@ Reading the table:
 
 | buffer_size | retrains | accuracy | before drift | after drift | samples to recover | mean retrain (ms) | total retrain (ms) | peak memory (KiB) |
 |---:|---:|---:|---:|---:|---:|---:|---:|---:|
-| 100 | 400 | 0.900 | 0.905 | 0.896 | 1,000 | 1.33 | 533.0 | 2.9 |
-| 250 | 133 | 0.911 | 0.917 | 0.904 | 1,200 | 3.75 | 498.2 | 23.5 |
-| 500 | 80 | 0.917 | 0.926 | 0.908 | 1,300 | 6.20 | 496.2 | 40.3 |
-| 1,000 | 40 | 0.924 | 0.941 | 0.909 | 1,700 | 12.88 | 515.2 | 83.6 |
-| 2,000 | 20 | 0.913 | 0.950 | 0.880 | 2,700 | 20.36 | 407.3 | 170.3 |
-| 5,000 | 8 | 0.856 | 0.957 | 0.781 | 5,700 | 52.07 | 416.5 | 427.2 |
-| 10,000 | 4 | 0.722 | 0.960 | 0.604 | 10,700 | 106.93 | 427.7 | 856.6 |
+| 100 | 400 | 0.900 | 0.905 | 0.896 | 1,000 | 3.60 | 1440.2 | 2.9 |
+| 250 | 133 | 0.911 | 0.917 | 0.904 | 1,200 | 12.49 | 1660.7 | 23.5 |
+| 500 | 80 | 0.917 | 0.926 | 0.908 | 1,300 | 18.36 | 1468.8 | 40.3 |
+| 1,000 | 40 | 0.924 | 0.941 | 0.909 | 1,700 | 26.88 | 1075.2 | 83.6 |
+| 2,000 | 20 | 0.913 | 0.950 | 0.880 | 2,700 | 44.85 | 896.9 | 170.3 |
+| 5,000 | 8 | 0.856 | 0.957 | 0.781 | 5,700 | 104.85 | 838.8 | 427.2 |
+| 10,000 | 4 | 0.722 | 0.960 | 0.604 | 10,700 | 203.36 | 813.4 | 856.6 |
 
 ![Accuracy vs buffer size](benchmark/results/buffer_size_accuracy.png)
 ![Retraining time vs buffer size](benchmark/results/buffer_size_retrain_time.png)
@@ -340,11 +341,11 @@ Reading the table:
 
 Reading the table:
 
-- **Stable data favours a large buffer.** Before the drift, accuracy rises steadily with `buffer_size` because each tree is trained on more samples.
-- **Changing data favours a small buffer.** After the drift the order reverses: a small buffer replaces the outdated tree within a few hundred samples, while the largest buffer keeps predicting with it for thousands.
-- **Retraining time per retrain grows roughly in proportion to the buffer**, but there are proportionally fewer retrains, so the total training time stays in the same range for every buffer size. What changes is how the cost arrives: many short pauses or a few long ones.
+- **Stable data favours a large buffer.** Before the drift, accuracy rises steadily with `buffer_size` (0.905 at 100 to 0.960 at 10,000) because each tree is trained on more samples.
+- **Changing data favours a small buffer.** After the drift the order reverses: `buffer_size=100` is back above 0.8 rolling accuracy 1,000 samples after the change (as soon as the 1,000-sample window allows), while `buffer_size=10000` keeps predicting with the outdated tree and needs 10,700 samples.
+- **Each retrain gets slower as the buffer grows** (3.6 ms at 100, 203 ms at 10,000), but there are far fewer of them, so the total retraining time falls from about 1.4 to 1.7 s for small buffers to about 0.8 s for the largest. A large buffer costs less overall but pauses the stream for longer each time.
 - **Memory grows in proportion to the buffer**, which is the only part of the model that scales with the data.
-- On this stream the best overall accuracy is at a middle value (`buffer_size=1000`).
+- On this stream the best overall accuracy is at a middle value (`buffer_size=1000`, 0.924).
 
 The full tables, including every size, are in `benchmark/results/`.
 
@@ -359,7 +360,7 @@ Fixes for the Assignment 2.1 feedback, each with a regression test in `tests/tes
 | `pairwise_distances([[1e9]], [[1e9+1], [-1e9]])` returned 0 instead of 1 | Pairs whose squared distance is tiny compared with `|x|^2 + |y|^2` (where the expanded formula cancels) are recomputed directly as `sum((x - y)^2)`. Centring alone could not help when the reference points are far apart. |
 | `OneHotEncoder` fitted on integers 1, 2 gave zero rows for floats 1.0, 2.0 | Categories are compared by value in a canonical text form, so whole-number floats and integers are the same category. Text codes such as `"1"` and `"1.0"` stay distinct, and this is documented. |
 | README install commands failed from the repository root | `pyproject.toml` now sits at the repository root next to the package; the three install options above were run against a clean checkout. |
-| The notebook needed GitHub credentials | The notebook and the demo script use the local checkout. No clone, no token. |
+| The notebook needed GitHub credentials | Opened from a local checkout, the notebook and the demo script import the package directly: no clone, no token. Colab is an optional second route. The notebook is committed with its outputs. |
 | No clean-install/import smoke check | `test_clean_import_smoke_check` imports every module in a fresh interpreter started outside the repository. |
 | Benchmark results file was empty | The CSV writer wrote only the header. Fixed, tested, and the populated result files are committed together with the notebook's benchmark output. |
 | Blanket claims about infinity and about benchmarking every function | The Conventions section lists exactly where infinity is rejected and where it is accepted. The benchmarks cover the cases listed in `benchmark/results/`, not every function. |
