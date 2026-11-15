@@ -1,15 +1,15 @@
 case,n,baseline,loop_ms,vec_ms,speedup,ok
-tree: best split of one node (d=8),200,loop over features x thresholds x rows,10.055230000034499,0.39634900008422846,25.36963635053363,True
-tree: best split of one node (d=8),1000,loop over features x thresholds x rows,55.0394619999679,1.3246729999991658,41.54947069956326,True
-tree: best split of one node (d=8),4000,loop over features x thresholds x rows,266.24764000007417,4.591871000002357,57.98238670030964,True
-tree: predict (depth 6),2000,one root-to-leaf walk per row,0.3935289998935332,0.18828899987965997,2.090026502584044,True
-tree: predict (depth 6),20000,one root-to-leaf walk per row,3.7795929999902,1.1226849999275146,3.366565866858671,True
-tree: predict (depth 6),200000,one root-to-leaf walk per row,57.379996999998184,22.145399000010002,2.5910572665668505,True
-"tree: buffered stream (buffer 500, depth 4)",1000,"loop tree, per-row predict",113.25826200004485,6.177774999969188,18.333180149909918,True
-"tree: buffered stream (buffer 500, depth 4)",4000,"loop tree, per-row predict",438.7759080000251,22.032459000001836,19.914976716851648,True
-"metrics: confusion matrix, chunks of 100",1000000,one increment per sample,39.041521000172,190.56633500008502,0.20487102824407352,True
-"stats: running mean/variance, chunks of 100",1000000,"Welford, one value at a time",48.04737499989642,303.37942099981774,0.15837387665106423,True
-"stats: histogram (20 bins), chunks of 100",1000000,one bin lookup per value,88.79516600018178,136.91229999994903,0.6485550677347093,True
-"metrics: confusion matrix, chunks of 10,000",1000000,one increment per sample,38.37690299997121,16.304830000080983,2.35371377682445,True
-"stats: running mean/variance, chunks of 10,000",1000000,"Welford, one value at a time",50.00011599986465,8.517686000004687,5.870152527322225,True
-"stats: histogram (20 bins), chunks of 10,000",1000000,one bin lookup per value,79.90530499978377,33.91273900001579,2.356203224981225,True
+tree: best split of one node (d=8),200,loop over features x thresholds x rows,18.101481997291557,0.7064189994707704,25.62428531912744,True
+tree: best split of one node (d=8),1000,loop over features x thresholds x rows,109.93018599765492,2.904532000684412,37.847813682807214,True
+tree: best split of one node (d=8),4000,loop over features x thresholds x rows,680.5520859998069,21.557568001298932,31.569056674611943,True
+tree: predict (depth 6),2000,one root-to-leaf walk per row,0.7295770010387059,0.7527090019721072,0.9692683349437895,True
+tree: predict (depth 6),20000,one root-to-leaf walk per row,6.754275000275811,2.9673999997612555,2.2761592642782342,True
+tree: predict (depth 6),200000,one root-to-leaf walk per row,141.90946400049143,67.74962200142909,2.0946163212172317,True
+"tree: buffered stream (buffer 500, depth 4)",1000,"loop tree, per-row predict",288.3359500010556,19.860323998727836,14.518189633740372,True
+"tree: buffered stream (buffer 500, depth 4)",4000,"loop tree, per-row predict",832.9103030009719,56.94270599997253,14.627164065602603,True
+"metrics: confusion matrix, chunks of 100",1000000,one increment per sample,97.00089100078912,727.2560820019862,0.13337927781059686,True
+"stats: running mean/variance, chunks of 100",1000000,"Welford, one value at a time",138.61863700003596,898.1364479986951,0.15434028683383014,True
+"stats: histogram (20 bins), chunks of 100",1000000,one bin lookup per value,490.9296780024306,358.4762310019869,1.3694901796702654,True
+"metrics: confusion matrix, chunks of 10,000",1000000,one increment per sample,87.27567499954603,34.157014000811614,2.555131868303015,True
+"stats: running mean/variance, chunks of 10,000",1000000,"Welford, one value at a time",139.46999900144874,23.793701999238692,5.861635108564075,True
+"stats: histogram (20 bins), chunks of 10,000",1000000,one bin lookup per value,397.45840999967186,50.055695999617456,7.940323315107023,True
